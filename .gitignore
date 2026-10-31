@@ -1,0 +1,8 @@
+__pycache__/
+*.pyc
+secrets.py
+.ota_key
+.ota_host
+*.bak
+*.tmp
+.DS_Store

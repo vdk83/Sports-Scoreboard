@@ -1,0 +1,602 @@
+# Sports scoreboard for Pimoroni Interstate 75 W + 64x32 HUB75 panel.
+# Dodgers (MLB), Seahawks (NFL), Kraken (NHL). Scores come from ESPN.
+#
+# One loop does everything. Network jobs (scores, schedules, weather, clock sync)
+# run one at a time, and every wait on the network calls Scoreboard.tick(), which
+# draws the next display frame and feeds the watchdog, so the ticker keeps moving
+# while something downloads. (A second core for the network was tried: it made
+# the display pause for seconds and the connections fail.)
+import gc
+import os
+import random
+import time
+
+import machine
+import network
+import ntptime
+
+import critters
+import espn
+import interstate75
+import jokes
+import mlb
+import ota
+import weather
+from board import AMBER, GREY, WHITE, Anim, Board, text_width
+from scores import (DAYS, LATITUDE, LEAGUES, LONGITUDE, MONTHS, banner, game_key, importance, iso_to_epoch,
+                    local_now, make_view, marquee_parts, next_game_lines, visible)
+from secrets import WIFI_PASSWORD, WIFI_SSID
+
+DISPLAY = interstate75.DISPLAY_INTERSTATE75_64X32
+
+POLL_LIVE = 15        # seconds between checks while one of our teams is playing
+POLL_SOON = 60        # a game starts within the hour
+POLL_IDLE = 300       # nothing happening
+NTP_REFRESH = 6 * 3600
+NEXT_REFRESH = 30 * 60  # how often to re-read each team's next game
+WEATHER_REFRESH = 15 * 60
+SLIDE_SECONDS = 6       # idle screen: seconds per slide (clock, then each team)
+ALL_REFRESH = 240       # how often to re-read league-wide scores for the ticker
+ALL_LIVE = 15           # ...and while a playoff game is on, which also gets a place on the board
+IDLE_FRAME_MS = 55      # ticker scroll speed: 1 pixel per frame
+CAMEO_MIN = 120         # seasonal cameo on the idle screen every CAMEO_MIN..CAMEO_MAX seconds
+CAMEO_MAX = 300
+SLIDE_REGION = (0, 24)
+TICKER_REGION = (25, 32)
+FRAME_MS = 30
+MODES = ("NORMAL", "CLOCK", "ART")  # button B cycles these; button A plays a cameo now
+WDT_MS = 8000           # hardware watchdog: reboot if the display loop stalls this long
+STALE_MS = 15 * 60 * 1000  # reboot if the network worker delivers nothing for this long
+
+
+i75 = interstate75.Interstate75(display=DISPLAY)
+board = Board(i75.display, i75.width, i75.height)
+wlan = network.WLAN(network.STA_IF)
+
+
+_wdt = None  # set in main(); create a file named `nowdt` on the board to turn it off while developing
+
+
+def feed():
+    if _wdt:
+        _wdt.feed()
+
+
+def message(*lines):
+    board.draw_message(list(lines))
+    i75.update()
+
+
+def wifi_up(timeout=20):
+    wlan.active(True)
+    try:
+        network.hostname("scoreboard")  # reachable as scoreboard.local
+    except Exception:
+        pass
+    if wlan.isconnected():
+        return True
+    wlan.connect(WIFI_SSID, WIFI_PASSWORD)
+    t0 = time.ticks_ms()
+    while not wlan.isconnected() and time.ticks_diff(time.ticks_ms(), t0) < timeout * 1000:
+        feed()
+        espn._wait()  # keeps the display moving once the main loop is running
+    return wlan.isconnected()
+
+
+def sync_clock():
+    for _ in range(3):
+        try:
+            ntptime.settime()
+            return True
+        except OSError:
+            feed()
+            time.sleep(1)
+    return False
+
+
+def brightness_for(hour):
+    """Dim the panel in the evening and a lot overnight."""
+    if 7 <= hour < 19:
+        return 1.0
+    if 19 <= hour < 22 or 6 <= hour < 7:
+        return 0.6
+    return 0.25
+
+
+def sky_for(hour):
+    """Colour behind daytime cameos: blue by day, a warm tint at dawn and dusk, black at night."""
+    if 8 <= hour < 18:
+        return (0, 18, 45)
+    if 5 <= hour < 8 or 18 <= hour < 20:
+        return (40, 14, 38)
+    return None
+
+
+# -- network worker (runs on core 1) -------------------------------------
+def job_poll(i):
+    league = LEAGUES[i]
+    if not wifi_up():
+        raise OSError("wifi")
+    if league["sport"] == "baseball":
+        games = mlb.fetch(league["mlb_team_id"])
+    else:
+        games = espn.fetch(league["sport"], league["path"], (league["abbr"],), league["early_exit"])
+    now = time.time()
+    if any(g["state"] == "in" for g in games):
+        wait = POLL_LIVE
+    elif any(g["state"] == "pre" and 0 <= iso_to_epoch(g["date"]) - now < 3600 for g in games):
+        wait = POLL_SOON
+    else:
+        wait = POLL_IDLE
+    print("poll", league["nick"], [(g["name"], g["state"], g["away_score"], g["home_score"]) for g in games])
+    return games, wait
+
+
+def job_next(i):
+    league = LEAGUES[i]
+    if not wifi_up():
+        raise OSError("wifi")
+    nx = espn.next_event(league["path"], league["team_slug"])
+    print("next", league["nick"], nx)
+    return nx, NEXT_REFRESH
+
+
+def job_all(i):
+    """League-wide scoreboard for the idle ticker (every team, not just ours)."""
+    league = LEAGUES[i]
+    if not wifi_up():
+        raise OSError("wifi")
+    if league["sport"] == "baseball":  # ESPN has no runners/outs/count; MLB does
+        games = mlb.fetch_all()
+    else:
+        games = espn.fetch(league["sport"], league["path"], None, False)
+    print("league", league["sport"], len(games), "games")
+    live = any(g["state"] == "in" and importance(g) for g in games)
+    return games, ALL_LIVE if live else ALL_REFRESH
+
+
+def job_weather(_):
+    if not wifi_up():
+        raise OSError("wifi")
+    wx = weather.fetch(LATITUDE, LONGITUDE)
+    print("weather", wx)
+    return wx, WEATHER_REFRESH
+
+
+def job_ntp(_):
+    if not wifi_up() or not sync_clock():
+        raise OSError("ntp")
+    return True, NTP_REFRESH
+
+
+JOBS = {"poll": job_poll, "next": job_next, "all": job_all, "wx": job_weather, "ntp": job_ntp}
+PRIORITY = {"poll": 0, "all": 1, "next": 2, "wx": 3, "ntp": 3}  # live scores before the ticker's league-wide data
+
+
+class Scoreboard:
+    def __init__(self):
+        self.inbox = []      # finished network jobs, applied by drain()
+        self.due = {}        # (job kind, league index) -> ticks_ms when it is next due
+        self.data = {}       # league index -> list of games from the last good poll
+        self.upcoming = {}   # league index -> next scheduled game (for the idle screen)
+        self.slide = -1
+        self.slide_drawn = None  # which slide is on screen (None = redraw it)
+        self.all_games = {}  # league index -> every game in that league's scoreboard
+        self.weather = None  # (icon kind, "54F")
+        self.ticker = []
+        self.ticker_width = 0
+        self.ticker_stale = True
+        self.joke = None
+        self.offset = 0
+        self.last_refresh = 0
+        self.scores = {}     # game key -> (away, home) last seen
+        self.states = {}     # game key -> pre / in / post
+        self.anims = []      # queued/active animations
+        self.clocks = {}     # game key -> [(clock, period), ticks_ms first seen, running?] to count the game clock down between reads
+        self.ticking = False
+        self.views = []
+        self.shown = []
+        self.clock_ok = False
+        self.dirty = True
+        self.last_draw = 0
+        self.cameo = None
+        self.cameo_due = time.ticks_add(time.ticks_ms(), random.randint(60, CAMEO_MIN) * 1000)
+        self.mode = 0
+        self.buttons = (False, False)
+        self.look_due = 0
+        self.last_result = time.ticks_ms()  # when a network job last succeeded
+        self.ota = None
+        self.healthy_due = time.ticks_add(time.ticks_ms(), 90000)
+        self.next_frame = time.ticks_ms()
+        self.job = "-"       # the network job in progress (for stall reports)
+        self.worst_gap = 0   # how late the display has been for a frame, since the last report
+        self.report_due = time.ticks_add(time.ticks_ms(), 60000)
+
+    # -- finished network jobs ---------------------------------------------
+    def drain(self):
+        while self.inbox:
+            self.last_result = time.ticks_ms()
+            kind, i, ok, value = self.inbox.pop(0)
+            if kind == "poll":
+                self.note_clocks(LEAGUES[i], value)
+                self.detect_changes(LEAGUES[i], value)
+                self.data[i] = value
+                self.refresh_views()
+            elif kind == "next":
+                self.upcoming[i] = value
+            elif kind == "all":
+                self.note_clocks(LEAGUES[i], value)
+                self.detect_changes(LEAGUES[i], [g for g in value if importance(g)])
+                self.all_games[i] = value
+                self.refresh_views()
+                self.ticker_stale = True
+            elif kind == "wx":
+                self.weather = value
+            elif kind == "ntp":
+                self.clock_ok = True
+            self.dirty = True
+
+    def detect_changes(self, league, games):
+        for g in games:
+            key = game_key(league["sport"], g)
+            now_scores = (g["away_score"], g["home_score"])
+            old = self.scores.get(key)
+            old_state = self.states.get(key)
+            self.scores[key] = now_scores
+            self.states[key] = g["state"]
+            if old_state == "in" and g["state"] == "post":
+                ours = "away" if g["away"] == league["abbr"] else "home" if g["home"] == league["abbr"] else None
+                mine, theirs = (now_scores if ours == "away" else now_scores[::-1])
+                if ours and mine != theirs:
+                    won = mine > theirs
+                    self.anims.append(Anim(key, league["sport"], league["color"], "WIN!" if won else "LOSS",
+                                           True, 150, "win" if won else "loss"))
+            if old is None or g["state"] == "pre":
+                continue
+            for side, o, n in (("away", old[0], now_scores[0]), ("home", old[1], now_scores[1])):
+                if n > o:
+                    text, ours = banner(league, g, side, n - o)
+                    a = Anim(key, league["sport"], league["color"] if ours else GREY, text, ours)
+                    if ours:
+                        a.cameo = critters.scoring(league["sport"], n - o)
+                        if a.cameo:
+                            a.total = a.cameo.total
+                    self.anims.append(a)
+
+    # -- drawing ---------------------------------------------------------
+    def note_clocks(self, league, games):
+        """Remember when each live game's clock last moved, so it can keep counting between reads."""
+        now = time.ticks_ms()
+        for g in games:
+            if g["state"] != "in" or not g.get("clock"):
+                continue
+            key = game_key(league["sport"], g)
+            c = (g["clock"], g["period"])
+            old = self.clocks.get(key)
+            if old is None:
+                self.clocks[key] = [c, now, False]
+            elif old[0] != c:
+                self.clocks[key] = [c, now, True]   # it moved since the last read: running
+            else:
+                old[2] = False                       # same as last read: stopped
+
+    def ticked(self, league, g, now_ms):
+        """The game with its clock counted down by the time since it was last read."""
+        rec = self.clocks.get(game_key(league["sport"], g))
+        if g["state"] != "in" or not rec or not rec[2]:
+            return g
+        try:
+            m, s = rec[0][0].split(":")
+            total = int(m) * 60 + int(s)
+        except ValueError:  # e.g. "45.3" in the last minute
+            return g
+        total = max(0, total - min(time.ticks_diff(now_ms, rec[1]) // 1000, 60))
+        self.ticking = True
+        return dict(g, clock="%d:%02d" % (total // 60, total % 60))
+
+    def refresh_views(self):
+        now = time.time()
+        pairs = visible([(LEAGUES[i], self.data.get(i, [])) for i in range(len(LEAGUES))],
+                        now, self.clock_ok,
+                        [(LEAGUES[i], self.all_games.get(i, [])) for i in range(len(LEAGUES))])
+        self.shown = pairs
+        self.ticking = False
+        now_ms = time.ticks_ms()
+        self.views = [make_view(l, self.ticked(l, g, now_ms), now) for l, g in pairs]
+        self.last_refresh = time.ticks_ms()
+
+    def build_ticker(self):
+        """Scores plus a joke. Rebuilt only when the ticker has scrolled off, so it never jumps."""
+        scores = marquee_parts([(LEAGUES[i], self.all_games.get(i, [])) for i in range(len(LEAGUES))],
+                               time.time(), self.clock_ok)
+        text, color = jokes.next_joke(self.joke)
+        self.joke = text
+        fresh = scores + [("|", (90, 90, 90)), (text, color), ("|", (90, 90, 90))]
+        # append to what is still on screen so there is never a black gap after a joke
+        x = board.w - self.offset
+        keep = []
+        for part in self.ticker:
+            x += text_width(part[0]) + 4
+            if x > 0:
+                keep.append(part)
+            else:
+                self.offset -= text_width(part[0]) + 4
+        self.ticker = keep + fresh
+        self.ticker_width = board.marquee_width(self.ticker)
+        self.ticker_stale = False
+
+    def region_for(self, key):
+        n = len(self.shown)
+        for idx, (l, g) in enumerate(self.shown):
+            if game_key(l["sport"], g) == key:
+                return board.regions(n)[idx]
+        return None
+
+    def idle_screen(self):
+        """No games on: clock or a team's next game on top (rotating), scores and jokes scrolling below."""
+        now = time.time()
+        n = len(LEAGUES)
+        idx = 0 if self.mode == 1 else self.slide % (n + 1)  # slide 0 is the clock
+        lt = local_now(now)
+        if idx == 0:
+            fx = self.weather[0] if self.weather else None
+            moving = fx in ("rain", "snow", "storm")
+            key = (idx, lt[4], self.offset // 2 if moving else 0)
+            if self.slide_drawn != key:
+                h = lt[3]
+                hhmm = "%d:%02d" % (h % 12 or 12, lt[4])
+                date = "%s %s %d" % (DAYS[lt[6]], MONTHS[lt[1] - 1], lt[2])
+                board.draw_clock(SLIDE_REGION, hhmm, "A" if h < 12 else "P", date, self.weather, self.offset)
+                board.rect(0, SLIDE_REGION[1], board.w, 1, (35, 35, 35))
+                self.slide_drawn = key
+        elif self.slide_drawn != idx:  # team slides only change every few seconds
+            i = idx - 1
+            league = LEAGUES[i]
+            lines = [(league["nick"], league["color"])]
+            nx = self.upcoming.get(i)
+            if nx and (not self.clock_ok or iso_to_epoch(nx["date"]) > now - 3600):
+                colors = {"opp": WHITE, "when": AMBER}
+                lines += [(t, colors[role]) for t, role in next_game_lines(league, nx, now)]
+            else:
+                lines += [("NOTHING", GREY), ("SCHEDULED", GREY)]
+            board.draw_message(lines, SLIDE_REGION)
+            board.rect(0, SLIDE_REGION[1], board.w, 1, (35, 35, 35))
+            self.slide_drawn = idx
+        board.draw_marquee(self.ticker, self.offset, TICKER_REGION)
+
+    def draw(self):
+        if self.anims:
+            a = self.anims[0]
+            region = self.region_for(a.key)
+            if a.cameo:  # our team scored: a whole-panel celebration
+                self.slide_drawn = None
+                hour = local_now(time.time())[3] if self.clock_ok else 12
+                a.cameo.draw(board, sky_for(hour))
+                a.frame += 1
+                if a.cameo.done or a.done:
+                    self.anims.pop(0)
+                    self.dirty = True
+                i75.update()
+                self.last_draw = time.ticks_ms()
+                return
+            if region is None:  # game scrolled off the board; skip its animation
+                self.anims.pop(0)
+                return self.draw()
+            self.slide_drawn = None
+            board.draw_games(self.views)
+            board.draw_anim(a, region)
+            a.frame += 1
+            if a.done:
+                self.anims.pop(0)
+                self.dirty = True
+        elif self.views:
+            self.cameo = None
+            self.slide_drawn = None
+            board.draw_games(self.views)
+        elif self.cameo:
+            self.slide_drawn = None  # a cameo repaints the whole panel
+            hour = local_now(time.time())[3] if self.clock_ok else 12
+            self.cameo.draw(board, sky_for(hour))
+            if self.cameo.done:
+                self.cameo = None
+        else:
+            self.idle_screen()
+        i75.update()
+        self.last_draw = time.ticks_ms()
+
+    # -- buttons, night mode, cameos -----------------------------------
+    def start_cameo(self):
+        lt = local_now(time.time())
+        self.cameo = critters.pick(lt[1], lt[2])
+        self.cameo_due = time.ticks_add(time.ticks_ms(), random.randint(CAMEO_MIN, CAMEO_MAX) * 1000)
+
+    def check_buttons(self):
+        try:
+            now = (i75.switch_pressed(interstate75.SWITCH_A), i75.switch_pressed(interstate75.SWITCH_B))
+        except Exception:
+            return
+        a, b = (n and not p for n, p in zip(now, self.buttons))
+        self.buttons = now
+        if a and not self.views:
+            self.start_cameo()
+        if b:
+            self.mode = (self.mode + 1) % len(MODES)
+            self.slide_drawn = None
+            self.cameo = None
+            message(("MODE", GREY), (MODES[self.mode], AMBER))
+            time.sleep_ms(700)
+
+    def look(self):
+        """Once in a while: brightness for the time of day."""
+        if self.clock_ok and time.ticks_diff(time.ticks_ms(), self.look_due) >= 0:
+            board.set_brightness(brightness_for(local_now(time.time())[3]))
+            self.slide_drawn = None
+            self.look_due = time.ticks_add(time.ticks_ms(), 60000)
+
+    def watch(self, now_ms):
+        """Report the worst display stall; reboot if the network has been silent too long."""
+        if time.ticks_diff(now_ms, self.report_due) >= 0:
+            print("display: worst frame delay", self.worst_gap, "ms; free", gc.mem_free())
+            self.worst_gap = 0
+            self.report_due = time.ticks_add(now_ms, 60000)
+        if time.ticks_diff(now_ms, self.last_result) > STALE_MS and not _wdt_off():
+            print("no network results for 15 min; rebooting")
+            machine.reset()
+
+    # -- network jobs ----------------------------------------------------
+    def schedule_jobs(self):
+        now = time.ticks_ms()
+        self.due = {("ntp", 0): time.ticks_add(now, NTP_REFRESH * 1000), ("wx", 0): now}
+        for i in range(len(LEAGUES)):
+            self.due[("poll", i)] = now
+            self.due[("next", i)] = now
+            self.due[("all", i)] = time.ticks_add(now, 20000 * (i + 1))
+
+    def run_job(self):
+        """Run the most important job that is due (at most one per call)."""
+        now = time.ticks_ms()
+        ready = [k for k, t in self.due.items() if time.ticks_diff(now, t) >= 0]
+        if not ready:
+            return
+        key = min(ready, key=lambda k: PRIORITY[k[0]])
+        kind, i = key
+        self.job = "%s%d" % (kind, i)
+        try:
+            value, wait = JOBS[kind](i)
+            self.inbox.append((kind, i, True, value))
+        except Exception as e:  # network hiccup: keep the old data, retry soon
+            print(kind, i, "failed:", repr(e))
+            wait = 10 if kind == "poll" else 60
+        self.due[key] = time.ticks_add(time.ticks_ms(), wait * 1000)
+        self.job = "gc"
+        t = time.ticks_ms()
+        gc.collect()
+        dt = time.ticks_diff(time.ticks_ms(), t)
+        if dt > 100:
+            print("timing: gc took", dt, "ms")
+        self.job = "-"
+
+    def tick(self, waiting=True):
+        """Called during network work: keep the watchdog fed and the display moving."""
+        feed()
+        if time.ticks_diff(time.ticks_ms(), self.next_frame) >= 0:
+            self.frame()
+        elif waiting:
+            time.sleep_ms(2)
+
+    # -- main loop -------------------------------------------------------
+    def run(self):
+        message(("WIFI...", WHITE))
+        while not wifi_up():
+            message(("NO WIFI", AMBER), ("RETRYING", GREY))
+            for _ in range(10):
+                feed()
+                time.sleep_ms(500)
+        message(("CLOCK...", WHITE))
+        self.clock_ok = sync_clock()
+        message(("LOADING", WHITE), ("SCORES", WHITE), (wlan.ifconfig()[0], GREY))
+        for host in (espn.HOST, mlb.HOST, weather.HOST):  # look these up now, not mid-ticker
+            try:
+                feed()
+                espn.resolve(host)
+            except Exception as e:
+                print("dns", host, "failed:", repr(e))
+        espn.set_tick(self.tick)
+        try:
+            self.ota = ota.start(feed, lambda: message(("UPDATING", AMBER), ("DONT UNPLUG", GREY)))
+        except Exception as e:
+            print("ota off:", repr(e))
+        print("ip", wlan.ifconfig()[0])
+        self.schedule_jobs()
+        self.next_frame = time.ticks_ms()
+        self.worst_gap = 0
+        self.loop()
+
+    def frame(self):
+        """Draw one frame for whatever the board is showing and schedule the next one."""
+        now_ms = time.ticks_ms()
+        late = time.ticks_diff(now_ms, self.next_frame)
+        if late > self.worst_gap:
+            self.worst_gap = late
+        if late > 300:
+            print("stall:", late, "ms late; net:", espn.where, "; job:", self.job)
+        if self.anims:
+            self.draw()
+            delay = FRAME_MS
+        elif self.views:
+            if self.dirty or time.ticks_diff(now_ms, self.last_draw) > (1000 if self.ticking else 20000):
+                self.refresh_views()
+                self.draw()
+                self.dirty = False
+            delay = 200
+        else:  # idle: clock/teams on top, ticker below, cameos now and then
+            self.slide = int(time.time()) // SLIDE_SECONDS
+            if self.dirty or time.ticks_diff(now_ms, self.last_refresh) > 60000:
+                self.refresh_views()
+                self.dirty = False
+            if self.ticker_stale and not self.ticker:
+                self.build_ticker()
+            self.offset += 1
+            if self.offset >= self.ticker_width:
+                self.build_ticker()
+            if not self.cameo and self.clock_ok and (
+                    self.mode == 2 or time.ticks_diff(now_ms, self.cameo_due) >= 0):
+                self.start_cameo()
+            self.draw()
+            delay = FRAME_MS if self.cameo else IDLE_FRAME_MS
+        self.next_frame = time.ticks_add(time.ticks_ms(), delay)
+
+    def loop(self):
+        while True:
+            now_ms = time.ticks_ms()
+            feed()
+            self.watch(now_ms)
+            t = time.ticks_ms()
+            self.drain()
+            dt = time.ticks_diff(time.ticks_ms(), t)
+            if dt > 150:
+                print("timing: applying results took", dt, "ms")
+            self.check_buttons()
+            self.look()
+            if self.ota and self.ota.poll():
+                self.slide_drawn = None
+                self.dirty = True
+            if self.healthy_due and time.ticks_diff(now_ms, self.healthy_due) >= 0:
+                ota.healthy()  # the new code has run for 90 s: no rollback needed
+                self.healthy_due = None
+            self.run_job()  # waits inside call tick(), which draws frames
+            if time.ticks_diff(time.ticks_ms(), self.next_frame) >= 0:
+                self.frame()
+            time.sleep_ms(5)
+
+
+def _wdt_off():
+    return "nowdt" in os.listdir()
+
+
+def main():
+    global _wdt
+    if not _wdt_off():
+        _wdt = machine.WDT(timeout=WDT_MS)
+    failures = 0
+    while True:
+        try:
+            Scoreboard().run()
+        except KeyboardInterrupt:
+            raise
+        except Exception as e:
+            failures += 1
+            print("crash:", repr(e))
+            try:
+                message(("ERROR", AMBER), ("RESTART", GREY))
+            except Exception:
+                pass
+            for _ in range(10):
+                feed()
+                time.sleep_ms(500)
+            gc.collect()
+            if failures >= 3:
+                machine.reset()
+
+
+main()
