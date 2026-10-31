@@ -14,7 +14,7 @@ import time
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 FILES = ["espn.py", "mlb.py", "board.py", "critters.py", "jokes.py", "weather.py", "scores.py", "ota.py",
-         "settings.py", "sun.py", "app.py", "demo.py", "cameo_demo.py"]
+         "settings.py", "sun.py", "page.py", "app.py", "demo.py", "cameo_demo.py"]
 PORT = 8080
 
 

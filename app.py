@@ -7,6 +7,7 @@
 # while something downloads. (A second core for the network was tried: it made
 # the display pause for seconds and the connections fail.)
 import gc
+import json
 import os
 import random
 import time
@@ -21,9 +22,10 @@ import interstate75
 import jokes
 import mlb
 import ota
+import page
 import settings
 import weather
-from board import AMBER, GOLD, GREY, RED, WHITE, Anim, Board, text_width
+from board import AMBER, FONT, GOLD, GREY, RED, WHITE, Anim, Board, text_width
 from scores import (DAYS, LEAGUES, MONTHS, banner, game_key, importance, iso_to_epoch, local_now, make_view,
                     marquee_parts, next_game_lines, next_sun, record_text, result_text, visible)
 from secrets import WIFI_PASSWORD, WIFI_SSID
@@ -126,8 +128,28 @@ def sync_clock():
     return False
 
 
+def unquote(s):
+    """%XX and + in text from a web address."""
+    s = s.replace("+", " ")
+    out = bytearray()
+    i = 0
+    while i < len(s):
+        if s[i] == "%" and len(s) - i >= 3:
+            try:
+                out.append(int(s[i + 1:i + 3], 16))
+                i += 3
+                continue
+            except ValueError:
+                pass
+        out += s[i].encode()
+        i += 1
+    return out.decode()
+
+
 def brightness_for(hour):
     """Dim the panel in the evening and a lot overnight (or a fixed level chosen on the web page)."""
+    if not settings.cfg["display"]:
+        return 0.0
     fixed = settings.cfg["bright"]
     if fixed:
         return fixed / 100
@@ -241,6 +263,7 @@ class Scoreboard:
         self.look_due = 0
         self.last_result = time.ticks_ms()  # when a network job last succeeded
         self.ota = None
+        self.ota_next = 0
         self.healthy_due = time.ticks_add(time.ticks_ms(), 90000)
         self.next_frame = time.ticks_ms()
         self.job = "-"       # the network job in progress (for stall reports)
@@ -499,7 +522,7 @@ class Scoreboard:
 
     def look(self):
         """Once in a while: brightness for the time of day."""
-        if (self.clock_ok or settings.cfg["bright"]) and time.ticks_diff(time.ticks_ms(), self.look_due) >= 0:
+        if (self.clock_ok or settings.cfg["bright"] or not settings.cfg["display"]) and time.ticks_diff(time.ticks_ms(), self.look_due) >= 0:
             board.set_brightness(brightness_for(local_now(time.time())[3] if self.clock_ok else 12))
             self.slide_drawn = None
             self.look_due = time.ticks_add(time.ticks_ms(), 60000)
@@ -549,13 +572,18 @@ class Scoreboard:
 
     # -- web page ----------------------------------------------------------
     def web(self, method, path, q):
-        """Handler for ota.py: the settings page at /ui and the log at /log."""
+        """Handler for ota.py: the settings page (/ui), its data (/state), changes (/set) and the log."""
         if path == "/log":
             return 200, settings.read_log(), "text/plain"
-        if path not in ("/", "/ui"):
+        if path == "/state":
+            d = dict(settings.cfg)
+            d["info"] = "%s - %d games on screen - %d KB free" % (
+                "WiFi ok" if self.net_ok else "NO WIFI", len(self.views), gc.mem_free() // 1024)
+            return 200, json.dumps(d), "application/json"
+        if path not in ("/", "/ui", "/set"):
             return None
         changed = False
-        for key in ("mode", "bright", "cameos", "lat", "lon", "tz"):
+        for key in ("display", "mode", "bright", "cameos", "lat", "lon", "tz"):
             if key in q and settings.set_value(key, q[key]):
                 changed = True
         if changed:
@@ -569,35 +597,21 @@ class Scoreboard:
                 self.cameo = None
         if "cameo" in q and not self.views:
             self.start_cameo()
+        if q.get("msg"):
+            self.say(unquote(q["msg"]))
+        if path == "/set":
+            return 200, "ok", "text/plain"
         return 200, self.page(q.get("k", "")), "text/html"
 
-    def page(self, k):
-        c = settings.cfg
+    def page(self, k=""):
+        return page.PAGE
 
-        def btn(label, key, val, on):
-            return "<a%s href='/ui?k=%s&%s=%s'>%s</a>" % (" class=on" if on else "", k, key, val, label)
-
-        h = ["<!doctype html><meta name=viewport content='width=device-width,initial-scale=1'>"
-             "<title>Scoreboard</title><style>body{font:17px sans-serif;background:#111;color:#eee;margin:16px}"
-             "a{display:inline-block;padding:10px 14px;margin:3px;border-radius:8px;background:#333;color:#eee;"
-             "text-decoration:none}a.on{background:#0a6}h3{margin:18px 0 4px;color:#9ab}"
-             "input{width:5em;font-size:16px;padding:6px}</style><h2>Scoreboard</h2>"]
-        h.append("<p>%s. %d games on screen. Free memory %d KB.</p>" % (
-            "WiFi ok" if self.net_ok else "NO WIFI", len(self.views), gc.mem_free() // 1024))
-        if self.fails:
-            h.append("<p>Failing: %s</p>" % ", ".join("%s%d" % key for key in self.fails))
-        h.append("<h3>Idle screen</h3>")
-        h += [btn(MODES[m], "mode", m, c["mode"] == m) for m in range(len(MODES))]
-        h.append("<h3>Brightness</h3>")
-        h += [btn("Auto" if b == 0 else "%d%%" % b, "bright", b, c["bright"] == b) for b in BRIGHT_STEPS]
-        h.append("<h3>Cameos</h3>")
-        h += [btn(name, "cameos", n, c["cameos"] == n) for n, name in enumerate(("Often", "Normal", "Rare", "Off"))]
-        h.append("<a href='/ui?k=%s&cameo=1'>Play one now</a>" % k)
-        h.append("<h3>Location (weather, sunrise)</h3><form action=/ui>"
-                 "<input type=hidden name=k value=%s>lat <input name=lat value=%s> lon <input name=lon value=%s> "
-                 "UTC<input name=tz value=%s> <input type=submit value=Set></form>" % (k, c["lat"], c["lon"], c["tz"]))
-        h.append("<h3>Diagnostics</h3><a href='/log?k=%s'>Log</a>" % k)
-        return "".join(h)
+    def say(self, text):
+        """Scroll a message from the web page across the ticker once (only while the idle screen shows)."""
+        text = "".join(ch for ch in text.upper() if ch in FONT)[:60].strip()
+        if text:
+            self.ticker += [("|", (90, 90, 90)), (text, (255, 120, 200)), ("|", (90, 90, 90))]
+            self.ticker_width = board.marquee_width(self.ticker)
 
     # -- network jobs ----------------------------------------------------
     def schedule_jobs(self):
@@ -637,6 +651,11 @@ class Scoreboard:
     def tick(self, waiting=True):
         """Called during network work: keep the watchdog fed and the display moving."""
         feed()
+        if self.ota and time.ticks_diff(time.ticks_ms(), self.ota_next) >= 0:  # the settings page, even mid-download
+            self.ota_next = time.ticks_add(time.ticks_ms(), 100)
+            if self.ota.poll():
+                self.slide_drawn = None
+                self.dirty = True
         if time.ticks_diff(time.ticks_ms(), self.next_frame) >= 0:
             self.frame()
         elif waiting:

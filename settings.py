@@ -14,6 +14,7 @@ CACHE = "cache.json"
 LOG_LINES = 40
 
 DEFAULTS = {
+    "display": 1,    # 0 = panel dark (the board keeps running), 1 = on
     "mode": 0,       # 0 NORMAL, 1 CLOCK, 2 ART
     "bright": 0,     # 0 = automatic by time of day, else a fixed percent
     "cameos": 1,     # index into app.CAMEO_RATES: 0 often, 1 normal, 2 rare, 3 off
@@ -21,7 +22,7 @@ DEFAULTS = {
     "lon": -122.12,
     "tz": -8,        # hours from UTC in winter (US daylight saving is applied on top)
 }
-LIMITS = {"mode": (0, 2), "bright": (0, 100), "cameos": (0, 3), "lat": (-90, 90), "lon": (-180, 180),
+LIMITS = {"display": (0, 1), "mode": (0, 2), "bright": (0, 100), "cameos": (0, 3), "lat": (-90, 90), "lon": (-180, 180),
           "tz": (-12, 14)}
 
 cfg = dict(DEFAULTS)

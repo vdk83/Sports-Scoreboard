@@ -85,7 +85,7 @@ class Server:
         s = socket.socket()
         s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
         s.bind(("0.0.0.0", PORT))
-        s.listen(1)
+        s.listen(4)
         s.setblocking(False)
         self.sock = s
         self.bound = time.ticks_ms()
@@ -98,22 +98,26 @@ class Server:
             except OSError as e:
                 print("ota rebind:", repr(e))
                 self.bound = time.ticks_ms()
-        try:
-            c, _ = self.sock.accept()
-        except OSError:
-            return False
-        c.settimeout(2)
-        try:
-            self.handle(c)
-        except Exception as e:
-            print("ota:", repr(e))
-            self.reply(c, 500, repr(e))
-        try:
-            c.close()
-        except OSError:
-            pass
-        gc.collect()
-        return True
+        served = False
+        for _ in range(4):  # a browser opens several connections at once: serve them all now
+            try:
+                c, _ = self.sock.accept()
+            except OSError:
+                break
+            c.settimeout(2)
+            try:
+                self.handle(c)
+            except Exception as e:
+                print("ota:", repr(e))
+                self.reply(c, 500, repr(e))
+            try:
+                c.close()
+            except OSError:
+                pass
+            served = True
+        if served:
+            gc.collect()
+        return served
 
     def reply(self, c, code, body="", ctype="text/plain"):
         try:

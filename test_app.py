@@ -143,6 +143,18 @@ class AppTest(unittest.TestCase):
         self.assertIsNone(self.sb.web("GET", "/nope", {"k": "k"}))
         self.assertEqual(self.sb.web("GET", "/log", {"k": "k"})[0], 200)
 
+    def test_web_set_state_and_message(self):
+        self.assertEqual(self.sb.web("GET", "/set", {"k": "k", "display": "0"}), (200, "ok", "text/plain"))
+        self.assertEqual(settings.cfg["display"], 0)
+        self.assertEqual(app.brightness_for(12), 0.0)
+        code, body, ctype = self.sb.web("GET", "/state", {"k": "k"})
+        self.assertEqual((code, ctype), (200, "application/json"))
+        self.assertEqual(app.json.loads(body)["display"], 0)
+        self.sb.web("GET", "/set", {"k": "k", "display": "1"})
+        self.sb.ticker = [("A", (1, 1, 1))]
+        self.sb.web("GET", "/set", {"k": "k", "msg": "dinner%20is+ready%21"})
+        self.assertEqual(self.sb.ticker[-2][0], "DINNER IS READY!")
+
     def test_cameo_rates(self):
         settings.cfg["cameos"] = 3
         self.sb.start_cameo()
