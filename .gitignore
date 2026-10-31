@@ -6,3 +6,4 @@ secrets.py
 *.bak
 *.tmp
 .DS_Store
+preview/

@@ -17,6 +17,8 @@ using a Pimoroni Interstate 75 W (RP2350) running Pimoroni MicroPython v0.0.5.
 | `jokes.py` | Jokes that scroll on the ticker |
 | `weather.py` | Current weather for the clock slide (Open-Meteo, no key) |
 | `cameo_demo.py` | Looping slideshow of every seasonal cameo |
+| `preview.py` | Run on the computer: PNGs or a live window of cameos, layouts and the clock, no board needed |
+| `test_logic.py` | Run on the computer: `python3 -m unittest test_logic` checks the game logic in `scores.py` |
 | `demo.py` | Plays each animation and every cameo on the panel without a live game |
 | `secrets.py` | WiFi login. Lives on the board only (see `secrets.example.py`) |
 
@@ -54,7 +56,7 @@ a quarter of the time it is one of our teams, otherwise it is a seasonal one (Pa
 | Teams | hawk flying by, the 12 flag, Kraken tentacles and eye, Dodgers baseball |
 
 Other behaviour:
-- **No stalls.** All downloads run on the Pico's second core; the ticker and animations keep moving.
+- **No stalls.** One loop runs everything; every wait on the network draws the next frame and feeds the watchdog, so the ticker and animations keep moving. (A second core for downloads was tried and made the display pause.)
 - **Night mode.** The panel dims after 7 pm and a lot after 10 pm; daytime cameos get a sky colour behind them.
 - **Game over.** Confetti and WIN! or grey rain and LOSS when one of our games ends.
 - **Buttons.** A plays a cameo now. B cycles NORMAL, CLOCK (big clock + ticker) and ART (cameos nonstop).
