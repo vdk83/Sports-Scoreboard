@@ -1,19 +1,22 @@
 # Game logic: which games to show, how to word them, what a score change means.
 import time
 
+import settings
+import sun
 from board import AMBER, BLUE, GREY, WHITE
 
-# Local time zone. Pacific, with US daylight saving.
-UTC_STANDARD_OFFSET = -8
-LATITUDE, LONGITUDE = 37.03, -122.12  # for the weather on the clock; the default location
+# Local time zone, weather and sun location come from config.json (see settings.py; the web page sets
+# them). Defaults: Pacific time with US daylight saving, the default location.
 
 LEAGUES = [
     {"sport": "baseball", "path": "baseball/mlb", "abbr": "LAD", "label": "LAD",
-     "nick": "DODGERS", "color": (0, 110, 255), "early_exit": False, "mlb_team_id": 119, "team_slug": "lad"},
+     "nick": "DODGERS", "color": (0, 110, 255), "early_exit": False, "mlb_team_id": 119, "team_slug": "lad", "rivals": ("SF", "SD")},
     {"sport": "football", "path": "football/nfl", "abbr": "SEA", "label": "SEA",
-     "nick": "SEAHAWKS", "color": (105, 220, 40), "early_exit": True, "team_slug": "sea"},
+     "nick": "SEAHAWKS", "color": (105, 220, 40), "early_exit": True, "team_slug": "sea",
+     "rivals": ("SF", "LAR")},
     {"sport": "hockey", "path": "hockey/nhl", "abbr": "SEA", "label": "KRK",
-     "nick": "KRAKEN", "color": (70, 210, 230), "early_exit": False, "team_slug": "sea"},
+     "nick": "KRAKEN", "color": (70, 210, 230), "early_exit": False, "team_slug": "sea",
+     "rivals": ("VAN", "VGK")},
 ]
 
 DAYS = ("MON", "TUE", "WED", "THU", "FRI", "SAT", "SUN")
@@ -36,10 +39,11 @@ def _nth_sunday(year, month, n):
 
 def utc_offset(t):
     """Hours from UTC for local time at epoch t (US daylight saving rules)."""
+    std = settings.cfg["tz"]
     year = time.gmtime(t)[0]
-    start = time.mktime((year, 3, _nth_sunday(year, 3, 2), 2 - UTC_STANDARD_OFFSET, 0, 0, 0, 0, 0))
-    end = time.mktime((year, 11, _nth_sunday(year, 11, 1), 1 - UTC_STANDARD_OFFSET, 0, 0, 0, 0, 0))
-    return UTC_STANDARD_OFFSET + 1 if start <= t < end else UTC_STANDARD_OFFSET
+    start = time.mktime((year, 3, _nth_sunday(year, 3, 2), 2 - std, 0, 0, 0, 0, 0))
+    end = time.mktime((year, 11, _nth_sunday(year, 11, 1), 1 - std, 0, 0, 0, 0, 0))
+    return std + 1 if start <= t < end else std
 
 
 def local_now(t):
@@ -118,6 +122,14 @@ def tag(g):
     return "PO"
 
 
+def rival(league, g):
+    """True when one of our teams plays a rival (ours plays it, e.g. Dodgers vs Giants)."""
+    if league["abbr"] not in (g["away"], g["home"]):
+        return False
+    other = g["home"] if g["away"] == league["abbr"] else g["away"]
+    return other in league.get("rivals", ())
+
+
 def make_view(league, g, now):
     ours = "away" if g["away"] == league["abbr"] else "home" if g["home"] == league["abbr"] else None
     pre = g["state"] == "pre"
@@ -130,7 +142,7 @@ def make_view(league, g, now):
         "sport": league["sport"],
         "color": league["color"] if ours else GOLD,
         "ours": ours,
-        "tag": tag(g),
+        "tag": tag(g) or ("RIV" if rival(league, g) else None),
         "away": lab("away"), "home": lab("home"),
         "away_score": None if pre else g["away_score"],
         "home_score": None if pre else g["home_score"],
@@ -200,7 +212,37 @@ def next_game_lines(league, nx, now):
             when = local_time_str(d, now)
     else:  # date known, time still TBD
         when = "%s %d" % (MONTHS[int(d[5:7]) - 1], int(d[8:10]))
-    return [(opp, "opp"), (when, "when")]
+    return [(opp, "rival" if (home if home != league["abbr"] else away) in league.get("rivals", ()) else "opp"),
+            (when, "when")]
+
+
+def record_text(nx):
+    """'8-5-1 L2' from a team's next-event record and streak, or '' when unknown."""
+    rec = nx.get("record") if nx else None
+    if not rec:
+        return ""
+    streak = nx.get("streak") or 0
+    return rec + (" %s%d" % ("W" if streak > 0 else "L", abs(streak)) if streak else "")
+
+
+def next_sun(now):
+    """('SUNRISE' or 'SUNSET', '7:31A', minutes until it) for the next one at our location."""
+    base = now - now % 86400
+    best = None
+    for k in (-1, 0, 1):
+        y, m, d = time.gmtime(base + k * 86400)[:3]
+        for name, hours in zip(("SUNRISE", "SUNSET"), sun.times(settings.cfg["lat"], settings.cfg["lon"], y, m, d)):
+            if hours is None:
+                continue
+            t = base + k * 86400 + int(hours * 3600)
+            if t > now and (best is None or t < best[0]):
+                best = (t, name)
+    if best is None:
+        return None
+    t, name = best
+    lt = time.gmtime(t + utc_offset(t) * 3600)
+    h = lt[3]
+    return name, "%d:%02d%s" % (h % 12 or 12, lt[4], "A" if h < 12 else "P"), (t - now) // 60
 
 
 def banner(league, g, side, delta):
@@ -216,6 +258,13 @@ def banner(league, g, side, delta):
             return "TOUCHDOWN!", True
         return {3: "FIELD GOAL!", 2: "SAFETY!", 1: "EXTRA POINT!"}.get(delta, "+%d!" % delta), True
     return ("RUN!" if delta == 1 else "%d RUNS!" % delta), True
+
+
+def result_text(won, mine, theirs):
+    """Word for the end-of-game animation."""
+    if won:
+        return "SHUTOUT!" if theirs == 0 else "WIN!"
+    return "LOSS"
 
 
 NEUTRAL = (175, 175, 175)  # teams that aren't ours

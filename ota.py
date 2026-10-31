@@ -6,7 +6,10 @@
 #   POST /apply      swap the uploaded files in (old ones kept as <name>.bak) and restart
 #   POST /clear      throw away uploads that were not applied
 #
-# Every request needs the header X-Key: <OTA_KEY from secrets.py on the board>.
+# Anything else (the web settings page and /log) goes to the handler app.py supplies.
+#
+# Every request needs the header X-Key: <OTA_KEY from secrets.py on the board>, or ?k=<OTA_KEY> in the
+# address so a phone browser can open  http://<board address>:8080/ui?k=<OTA_KEY>.
 # If an update leaves the board unable to start three times in a row, main.py puts the .bak files back.
 import binascii
 import gc
@@ -51,11 +54,23 @@ def healthy():
         pass
 
 
+def parse_query(path):
+    """'/ui?k=abc&mode=1' -> ('/ui', {'k': 'abc', 'mode': '1'}). Values are not unescaped."""
+    path, _, qs = path.partition("?")
+    q = {}
+    for pair in qs.split("&"):
+        k, _, v = pair.partition("=")
+        if k:
+            q[k] = v
+    return path, q
+
+
 class Server:
-    def __init__(self, key, feed, show):
+    def __init__(self, key, feed, show, handler=None):
         self.key = key
         self.feed = feed
         self.show = show  # called when an upload starts (puts a message on the panel)
+        self.handler = handler  # handler(method, path, query) -> (code, body, content type) or None
         self.t0 = time.ticks_ms()
         self.sock = None
         self.bind()
@@ -100,9 +115,10 @@ class Server:
         gc.collect()
         return True
 
-    def reply(self, c, code, body=""):
+    def reply(self, c, code, body="", ctype="text/plain"):
         try:
-            c.send("HTTP/1.0 %d X\r\nContent-Length: %d\r\nConnection: close\r\n\r\n%s" % (code, len(body), body))
+            c.send("HTTP/1.0 %d X\r\nContent-Type: %s\r\nContent-Length: %d\r\nConnection: close\r\n\r\n%s" % (
+                code, ctype, len(body), body))
         except OSError:
             pass
 
@@ -115,12 +131,13 @@ class Server:
             buf += d
         head, _, body = buf.partition(b"\r\n\r\n")
         lines = head.decode().split("\r\n")
-        method, path = lines[0].split(" ")[:2]
+        method, target = lines[0].split(" ")[:2]
+        path, query = parse_query(target)
         hdr = {}
         for ln in lines[1:]:
             k, _, v = ln.partition(":")
             hdr[k.strip().lower()] = v.strip()
-        if hdr.get("x-key") != self.key:
+        if (hdr.get("x-key") or query.get("k")) != self.key:
             return self.reply(c, 403, "bad key")
         if method == "GET" and path == "/hashes":
             out = "".join("%s %s\n" % (f, file_hash(f)) for f in sorted(os.listdir())
@@ -138,6 +155,10 @@ class Server:
             return self.reply(c, 200, "cleared")
         if method == "POST" and path == "/apply":
             return self.apply(c)
+        if self.handler and method == "GET":
+            r = self.handler(method, path, query)
+            if r:
+                return self.reply(c, *r)
         self.reply(c, 404, "no")
 
     def put(self, c, name, hdr, body):
@@ -214,10 +235,10 @@ class Server:
         machine.reset()
 
 
-def start(feed, show):
+def start(feed, show, handler=None):
     """Start the server, or return None if secrets.py has no OTA_KEY."""
     try:
         from secrets import OTA_KEY
     except ImportError:
         return None
-    return Server(OTA_KEY, feed, show)
+    return Server(OTA_KEY, feed, show, handler)

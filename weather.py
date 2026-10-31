@@ -1,4 +1,4 @@
-# Current weather from Open-Meteo (free, no key). Set LATITUDE/LONGITUDE in scores.py.
+# Current weather from Open-Meteo (free, no key). The location is set on the board's web page (settings.py).
 import json
 
 import espn

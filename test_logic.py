@@ -11,6 +11,8 @@ os.environ["TZ"] = "UTC"
 time.tzset()
 
 import scores  # noqa: E402
+import settings  # noqa: E402
+import sun  # noqa: E402
 from scores import LEAGUES, banner, importance, local_time_str, make_view, marquee_parts, status_text, tag, visible  # noqa: E402
 
 LAD, SEA_NFL, SEA_NHL = LEAGUES
@@ -122,6 +124,69 @@ class Marquee(unittest.TestCase):
         text = " ".join(p[0] for p in marquee_parts([(SEA_NFL, [game()])], now, True))
         self.assertIn("NFL", text)
         self.assertIn("KC", text)
+
+
+class Rivals(unittest.TestCase):
+    def test_rival_tag_and_colour(self):
+        g = game(sport="baseball", name="SF @ LAD", away="SF", home="LAD")
+        self.assertEqual(make_view(LAD, g, epoch(2026, 10, 25, 20))["tag"], "RIV")
+        self.assertIsNone(make_view(LAD, dict(g, away="COL"), epoch(2026, 10, 25, 20))["tag"])
+        nx = {"date": "2026-11-01T02:10Z", "name": "SF @ LAD", "time_valid": True}
+        self.assertEqual(scores.next_game_lines(LAD, nx, epoch(2026, 10, 31, 12))[0], ("VS SF", "rival"))
+
+    def test_playoff_tag_wins_over_rival(self):
+        g = game(sport="baseball", away="SF", home="LAD", playoff=True, note="World Series")
+        self.assertEqual(make_view(LAD, g, epoch(2026, 10, 25, 20))["tag"], "WS")
+
+
+class Record(unittest.TestCase):
+    def test_text(self):
+        self.assertEqual(scores.record_text({"record": "8-5-1", "streak": -2}), "8-5-1 L2")
+        self.assertEqual(scores.record_text({"record": "8-5", "streak": 3}), "8-5 W3")
+        self.assertEqual(scores.record_text({"record": "8-5", "streak": 0}), "8-5")
+        self.assertEqual(scores.record_text({"record": None, "streak": 3}), "")
+        self.assertEqual(scores.record_text(None), "")
+
+    def test_shutout_wording(self):
+        self.assertEqual(scores.result_text(True, 3, 0), "SHUTOUT!")
+        self.assertEqual(scores.result_text(True, 3, 1), "WIN!")
+        self.assertEqual(scores.result_text(False, 0, 3), "LOSS")
+
+
+class Sun(unittest.TestCase):
+    def test_santa_cruz_solstice(self):
+        r, s = sun.times(37.03, -122.12, 2026, 12, 21)
+        self.assertTrue(7.0 <= (r - 8) % 24 <= 7.4, r)    # about 7:10 PST
+        self.assertTrue(16.8 <= (s - 8) % 24 <= 17.2, s)  # about 4:55 PST
+
+    def test_polar_night(self):
+        self.assertEqual(sun.times(80, 0, 2026, 12, 21), (None, None))
+
+    def test_next_sun(self):
+        name, at, mins = scores.next_sun(epoch(2026, 10, 31, 20))  # 1 pm Pacific
+        self.assertEqual(name, "SUNSET")
+        self.assertTrue(at.endswith("P"))
+        self.assertTrue(240 < mins < 400)
+
+
+class Settings(unittest.TestCase):
+    def setUp(self):
+        settings.cfg.update(settings.DEFAULTS)
+
+    def test_validation(self):
+        self.assertTrue(settings.set_value("bright", "25"))
+        self.assertEqual(settings.cfg["bright"], 25)
+        for key, bad in (("bright", "101"), ("mode", "7"), ("lat", "91"), ("lat", "north"), ("nope", "1")):
+            self.assertFalse(settings.set_value(key, bad), (key, bad))
+        self.assertEqual(settings.cfg["bright"], 25)
+        self.assertTrue(settings.set_value("lat", "-33.9"))
+        self.assertEqual(settings.cfg["lat"], -33.9)
+
+    def test_log_is_bounded(self):
+        for i in range(100):
+            settings.log("line", i)
+        self.assertLessEqual(len(settings._lines), settings.LOG_LINES)
+        self.assertTrue(settings._lines[-1].endswith("line 99"))
 
 
 if __name__ == "__main__":
