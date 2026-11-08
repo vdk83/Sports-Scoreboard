@@ -3,21 +3,98 @@ import time
 
 import settings
 import sun
+import teams
 from board import AMBER, BLUE, GREY, WHITE
 
 # Local time zone, weather and sun location come from config.json (see settings.py; the web page sets
-# them). Defaults: Pacific time with US daylight saving, the default location.
+# them). Defaults: Pacific time with US daylight saving, with the default location set in settings.py.
 
-LEAGUES = [
-    {"sport": "baseball", "path": "baseball/mlb", "abbr": "LAD", "label": "LAD",
-     "nick": "DODGERS", "color": (0, 110, 255), "early_exit": False, "mlb_team_id": 119, "team_slug": "lad", "rivals": ("SF", "SD")},
-    {"sport": "football", "path": "football/nfl", "abbr": "SEA", "label": "SEA",
-     "nick": "SEAHAWKS", "color": (105, 220, 40), "early_exit": True, "team_slug": "sea",
-     "rivals": ("SF", "LAR")},
-    {"sport": "hockey", "path": "hockey/nhl", "abbr": "SEA", "label": "KRK",
-     "nick": "KRAKEN", "color": (70, 210, 230), "early_exit": False, "team_slug": "sea",
-     "rivals": ("VAN", "VGK")},
+# The three sports we know about, and what to fetch for each (the feeds are per sport).
+SPORTS = [
+    {"sport": "baseball", "path": "baseball/mlb", "early_exit": False, "abbr": "", "label": "", "rivals": (), "nick": "MLB"},
+    {"sport": "football", "path": "football/nfl", "early_exit": True, "abbr": "", "label": "", "rivals": (), "nick": "NFL"},
+    {"sport": "hockey", "path": "hockey/nhl", "early_exit": False, "abbr": "", "label": "", "rivals": (), "nick": "NHL"},
+    {"sport": "basketball", "path": "basketball/nba", "early_exit": True, "abbr": "", "label": "", "rivals": (), "nick": "NBA"},
+    {"sport": "soccer", "path": "soccer/usa.1", "early_exit": True, "abbr": "", "label": "", "rivals": (), "nick": "MLS"},
 ]
+SPORT_INDEX = {s["sport"]: i for i, s in enumerate(SPORTS)}
+
+# LEAGUES has one entry per team we follow (any number per sport), rebuilt from the settings by apply_teams().
+# It is changed in place, so every module that imported it sees the change.
+LEAGUES = []
+MAX_PER_SPORT = 4
+ORIGINAL = (("baseball", "LAD"), ("football", "SEA"), ("hockey", "SEA"))  # the celebration cameos are drawn for these
+RIVALS = {("baseball", "LAD"): ("SF", "SD"), ("football", "SEA"): ("SF", "LAR"), ("hockey", "SEA"): ("VAN", "VGK"),
+          ("basketball", "GS"): ("LAL", "LAC"), ("soccer", "SEA"): ("POR", "VAN", "LAFC")}
+
+
+def find_team(sport, abbr):
+    """The teams.py row (full name, nickname, abbreviation, ESPN page, colour, MLB id) or None."""
+    for row in teams.TEAMS.get(sport, ()):
+        if row[2] == abbr:
+            return row
+    return None
+
+
+def follow_entry(sport, abbr):
+    """The LEAGUES entry for a followed team, or None."""
+    for f in LEAGUES:
+        if f["sport"] == sport and f["abbr"] == abbr:
+            return f
+    return None
+
+
+def followed(sport, abbr):
+    return follow_entry(sport, abbr) is not None
+
+
+def entry_for(sport, g):
+    """The followed team playing in game g (the first, if both are), else the sport's own entry."""
+    for f in LEAGUES:
+        if f["sport"] == sport and f["abbr"] in (g["away"], g["home"]):
+            return f
+    return SPORTS[SPORT_INDEX[sport]]
+
+
+def team_color(sport, abbr):
+    f = follow_entry(sport, abbr)
+    return f["color"] if f else NEUTRAL
+
+
+def chosen(sport):
+    """The followed abbreviations in settings for a sport: valid ones only, no repeats, at least one."""
+    out = []
+    for tok in settings.cfg["team_" + sport].split(","):
+        tok = tok.strip().upper()
+        if tok and tok not in out and find_team(sport, tok):
+            out.append(tok)
+    return out[:MAX_PER_SPORT] or [settings.DEFAULTS["team_" + sport]]
+
+
+def apply_teams():
+    """Rebuild LEAGUES from the settings. Returns the indexes (into SPORTS) of sports whose teams changed."""
+    old = [(f["sport"], f["abbr"]) for f in LEAGUES]
+    entries = []
+    for s in SPORTS:
+        sport = s["sport"]
+        abbrs = chosen(sport)
+        settings.cfg["team_" + sport] = ",".join(abbrs)
+        for abbr in abbrs:
+            name, nick, abbr, slug, color, mlb_id = find_team(sport, abbr)
+            e = {"sport": sport, "path": s["path"], "abbr": abbr, "nick": nick, "color": color,
+                 "label": "KRK" if (sport, abbr) == ("hockey", "SEA") else abbr, "early_exit": s["early_exit"],
+                 "team_slug": slug, "rivals": RIVALS.get((sport, abbr), ())}
+            if sport == "baseball":
+                e["mlb_team_id"] = mlb_id
+            entries.append(e)
+    LEAGUES[:] = entries
+    new = [(f["sport"], f["abbr"]) for f in LEAGUES]
+    changed = []
+    for pair in old + new:
+        if (pair in old) != (pair in new) and SPORT_INDEX[pair[0]] not in changed:
+            changed.append(SPORT_INDEX[pair[0]])
+    return changed
+
 
 DAYS = ("MON", "TUE", "WED", "THU", "FRI", "SAT", "SUN")
 
@@ -76,11 +153,15 @@ def status_text(g, now):
         if n and w[0] in ("TOP", "BOT", "BOTTOM", "MID", "MIDDLE", "END"):
             return {"TOP": "^", "BOT": "v", "BOTTOM": "v", "MID": "MID ", "MIDDLE": "MID ", "END": "END "}[w[0]] + n
         return d[:12]
-    if "HALF" in d:
+    if "HALF" in d or (g["sport"] == "soccer" and d.startswith("HT")):
         return "HALFTIME"
     p = g["period"]
+    if g["sport"] == "soccer":
+        return g["clock"] or d[:12]  # the minute, like 67' or 90'+3'
     if g["sport"] == "football":
         tag = "OT" if p > 4 else "Q%d" % p
+    elif g["sport"] == "basketball":
+        tag = "Q%d" % p if p <= 4 else "OT" if p == 5 else "%dOT" % (p - 4)
     else:
         tag = "SO" if p > 4 else "OT" if p > 3 else "P%d" % p
     if "END" in d:
@@ -96,10 +177,13 @@ def short_status(g, now):
     if st == "post":
         return "F"
     s = status_text(g, now)
-    return s.split()[0] if g["sport"] != "baseball" else s
+    if g["sport"] == "baseball":
+        return s
+    return s.split()[0] + (" PP" if g.get("pp_on") else "")
 
 
-CHAMPIONSHIPS = (("WORLD SERIES", "WS"), ("SUPER BOWL", "SB"), ("STANLEY CUP", "CUP"))
+CHAMPIONSHIPS = (("WORLD SERIES", "WS"), ("SUPER BOWL", "SB"), ("STANLEY CUP", "CUP"), ("NBA FINALS", "NBA"),
+                 ("MLS CUP", "MLS"))
 GOLD = (255, 200, 60)
 
 
@@ -149,10 +233,16 @@ def make_view(league, g, now):
         "status": status_text(g, now),
         "short": short_status(g, now),
         "status_color": color,
+        "close": is_close(g),
     }
     if g["sport"] == "baseball" and g["state"] == "in" and "bases" in g:
         # live baseball: board draws the diamond, out dots and ABS challenge squares
         view["live"] = {"bases": g["bases"], "outs": g["outs"], "count": g["count"], "abs": g["abs"]}
+    if g["sport"] == "hockey" and g["state"] == "in" and g.get("sog"):
+        # live hockey: shots on goal (away, home) and the team on a power play, if any
+        view["hockey"] = {"sog": g["sog"], "pp": g.get("pp"), "pp_on": g.get("pp_on", False)}
+    if g["sport"] == "football" and g["state"] == "in" and 1 <= g["period"] <= 4:
+        view["quarter"] = g["period"]
     return view
 
 
@@ -164,7 +254,8 @@ def visible(leagues_data, now, clock_ok, league_wide=()):
     """[(league, game)] to put on screen: live first, then by importance, then start time.
 
     Our teams' games always get a place. league_wide is [(league, games)] for every game in
-    each league; its playoff games get a place too, the finals ahead of the rest.
+    each league; its playoff games get a place too, the finals ahead of the rest. Each game is
+    paired with the followed team playing in it (or the sport's own entry).
     """
     out = []
     seen = set()
@@ -178,14 +269,20 @@ def visible(leagues_data, now, clock_ok, league_wide=()):
                 continue
             if g["state"] == "post" and clock_ok and now - iso_to_epoch(g["date"]) > (8 if imp > 1 else 5) * 3600:
                 continue
-            out.append((league, g))
+            out.append((entry_for(league["sport"], g), g))
+    done = set()
     for league, games in leagues_data:
         for g in games:
+            key = game_key(league["sport"], g)
+            if key in done:  # both teams followed: one card for the game
+                continue
             if g["state"] == "pre":
                 continue  # not started yet; the idle screen covers it
             if g["state"] == "post" and clock_ok and now - iso_to_epoch(g["date"]) > SHOW_AFTER:
                 continue
-            out.append((league, g))
+            done.add(key)
+            out.append((entry_for(league["sport"], g), g))
+
     def rank(lg):
         league, g = lg
         mine = league["abbr"] in (g["away"], g["home"])
@@ -245,13 +342,52 @@ def next_sun(now):
     return name, "%d:%02d%s" % (h % 12 or 12, lt[4], "A" if h < 12 else "P"), (t - now) // 60
 
 
+def sun_today(now):
+    """(sunrise, sunset) as epoch seconds for the local day containing `now`; either may be None."""
+    lt = local_now(now)
+    base = now - now % 86400
+    out = [None, None]
+    for k in (-1, 0, 1):  # the UTC date holding the event can differ from the local date
+        y, m, d = time.gmtime(base + k * 86400)[:3]
+        for j, hours in enumerate(sun.times(settings.cfg["lat"], settings.cfg["lon"], y, m, d)):
+            if hours is None:
+                continue
+            t = base + k * 86400 + int(hours * 3600)
+            if local_now(t)[:3] == lt[:3]:
+                out[j] = t
+    return tuple(out)
+
+
+def is_close(g):
+    """A live game that is tight late on: baseball 9th+ within 1, hockey 3rd+ within 1, football 4th+ within 8,
+    basketball 4th+ within 5, soccer 2nd half within 1."""
+    if g["state"] != "in":
+        return False
+    try:
+        diff = abs(g["away_score"] - g["home_score"])
+        p = g["period"] or 0
+        if g["sport"] == "baseball":
+            return p >= 9 and diff <= 1
+        if g["sport"] == "hockey":
+            return p >= 3 and diff <= 1
+        if g["sport"] == "football":
+            return p >= 4 and diff <= 8
+        if g["sport"] == "basketball":
+            return p >= 4 and diff <= 5
+        if g["sport"] == "soccer":
+            return p >= 2 and diff <= 1
+    except TypeError:
+        pass
+    return False
+
+
 def banner(league, g, side, delta):
     """(text, ours) describing a score change of `delta` for `side`."""
-    ours = (g[side] == league["abbr"])
     sport = league["sport"]
+    ours = followed(sport, g[side])
     if not ours:
         return "%s +%d" % (g[side], delta), False
-    if sport == "hockey":
+    if sport in ("hockey", "soccer"):
         return ("GOAL!" if delta == 1 else "%d GOALS!" % delta), True
     if sport == "football":
         if delta >= 6:
@@ -268,7 +404,7 @@ def result_text(won, mine, theirs):
 
 
 NEUTRAL = (175, 175, 175)  # teams that aren't ours
-TAGS = {"baseball": "MLB", "football": "NFL", "hockey": "NHL"}
+TAGS = {"baseball": "MLB", "football": "NFL", "hockey": "NHL", "basketball": "NBA", "soccer": "MLS"}
 MARQUEE_BEFORE = 20 * 3600
 MARQUEE_AFTER = 14 * 3600
 
@@ -294,8 +430,8 @@ def marquee_parts(all_games, now, clock_ok):
         picked.sort(key=lambda g: (g["state"] != "in", g["date"]))
         parts.append((TAGS[league["sport"]], WHITE))
         for g in picked:
-            ca = league["color"] if g["away"] == league["abbr"] else NEUTRAL
-            ch = league["color"] if g["home"] == league["abbr"] else NEUTRAL
+            ca = team_color(league["sport"], g["away"])
+            ch = team_color(league["sport"], g["home"])
             if importance(g):
                 parts.append((tag(g), GOLD))
             if g["state"] == "pre":
@@ -307,3 +443,6 @@ def marquee_parts(all_games, now, clock_ok):
                           (short_status(g, now), AMBER if g["state"] == "in" else GREY)]
             parts.append(("|", (90, 90, 90)))
     return parts or [("NO SCORES TODAY", GREY)]
+
+
+apply_teams()  # follow the teams in settings from the start

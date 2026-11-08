@@ -94,17 +94,23 @@ def abs_challenges(pk):
     return None
 
 
-def fetch(team_id):
-    """Games for one team from yesterday through the next week."""
+def fetch(team_ids):
+    """Games for one team (or a list of teams) from yesterday through the next week."""
     gc.collect()
+    if isinstance(team_ids, int):
+        team_ids = [team_ids]
     now = time.time()
-    path = ("/api/v1/schedule?sportId=1&teamId=%d&startDate=%s&endDate=%s"
+    path = ("/api/v1/schedule?sportId=1&teamId=%s&startDate=%s&endDate=%s"
             "&hydrate=linescore,team&fields=%s"
-            % (team_id, _day(now - 86400), _day(now + 7 * 86400), FIELDS))
+            % (",".join(str(t) for t in team_ids), _day(now - 86400), _day(now + 7 * 86400), FIELDS))
     data = _get_json(path)
     games = []
+    seen = set()
     for day in data.get("dates", []):
         for raw in day.get("games", []):
+            if raw["gamePk"] in seen:  # two followed teams in one game
+                continue
+            seen.add(raw["gamePk"])
             g = convert(raw)
             if g:
                 games.append(g)

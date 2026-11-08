@@ -73,6 +73,7 @@ class Server:
         self.handler = handler  # handler(method, path, query) -> (code, body, content type) or None
         self.t0 = time.ticks_ms()
         self.sock = None
+        self.waiting = []  # [socket, bytes so far, time opened] for connections still sending their request
         self.bind()
 
     def bind(self):
@@ -98,41 +99,66 @@ class Server:
             except OSError as e:
                 print("ota rebind:", repr(e))
                 self.bound = time.ticks_ms()
-        served = False
-        for _ in range(4):  # a browser opens several connections at once: serve them all now
+        for _ in range(4):  # a browser opens several connections at once
             try:
                 c, _ = self.sock.accept()
             except OSError:
                 break
-            c.settimeout(2)
+            c.setblocking(False)
+            self.waiting.append([c, b"", time.ticks_ms()])
+        while len(self.waiting) > 8:  # too many: drop the oldest
+            self.drop(self.waiting.pop(0))
+        served = False
+        now = time.ticks_ms()
+        for w in self.waiting[:]:
+            c, buf, t0 = w
             try:
-                self.handle(c)
-            except Exception as e:
-                print("ota:", repr(e))
-                self.reply(c, 500, repr(e))
-            try:
-                c.close()
-            except OSError:
-                pass
-            served = True
+                d = c.recv(512)
+            except OSError as e:
+                d = None if (e.args and e.args[0] == 11) else b""  # 11: nothing sent yet
+            if d is None:  # browsers open spare connections they never use: do not wait on those
+                if time.ticks_diff(now, t0) > 8000:
+                    self.waiting.remove(w)
+                    self.drop(w)
+                continue
+            if not d:  # the other side gave up
+                self.waiting.remove(w)
+                self.drop(w)
+                continue
+            w[1] = buf = buf + d
+            if b"\r\n\r\n" in buf or len(buf) > 2048:
+                self.waiting.remove(w)
+                c.settimeout(2)
+                try:
+                    self.handle(c, buf)
+                except Exception as e:
+                    print("ota:", repr(e))
+                    self.reply(c, 500, repr(e))
+                self.drop(w)
+                served = True
         if served:
             gc.collect()
         return served
 
-    def reply(self, c, code, body="", ctype="text/plain"):
+    def drop(self, w):
         try:
-            c.send("HTTP/1.0 %d X\r\nContent-Type: %s\r\nContent-Length: %d\r\nConnection: close\r\n\r\n%s" % (
-                code, ctype, len(body), body))
+            w[0].close()
         except OSError:
             pass
 
-    def handle(self, c):
-        buf = b""
-        while b"\r\n\r\n" not in buf:
-            d = c.recv(512)
-            if not d or len(buf) > 2048:
-                return
-            buf += d
+    def reply(self, c, code, body="", ctype="text/plain"):
+        try:
+            # the settings page is plain ASCII: send it as it is instead of making a second copy in memory
+            data = body.encode() if isinstance(body, str) and len(body) < 3000 else body
+            c.write("HTTP/1.0 %d X\r\nContent-Type: %s\r\nContent-Length: %d\r\nConnection: close\r\n\r\n" % (
+                code, ctype, len(data)))
+            c.write(data)
+        except OSError:
+            pass
+
+    def handle(self, c, buf):
+        if b"\r\n\r\n" not in buf:
+            return
         head, _, body = buf.partition(b"\r\n\r\n")
         lines = head.decode().split("\r\n")
         method, target = lines[0].split(" ")[:2]
@@ -150,8 +176,10 @@ class Server:
         if method == "GET" and path == "/status":
             w = network.WLAN(network.STA_IF)
             gc.collect()
-            return self.reply(c, 200, "up %ds free %d rssi %s\n" % (
-                time.ticks_diff(time.ticks_ms(), self.t0) // 1000, gc.mem_free(), w.status("rssi")))
+            fs = os.statvfs("/")  # flash storage: block size, total blocks, free blocks
+            return self.reply(c, 200, "up %ds free %d rssi %s flash free %d of %d KB\n" % (
+                time.ticks_diff(time.ticks_ms(), self.t0) // 1000, gc.mem_free(), w.status("rssi"),
+                fs[0] * fs[3] // 1024, fs[0] * fs[2] // 1024))
         if method == "PUT" and path.startswith("/f/"):
             return self.put(c, path[3:], hdr, body)
         if method == "POST" and path == "/clear":

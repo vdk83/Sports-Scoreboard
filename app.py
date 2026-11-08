@@ -21,13 +21,15 @@ import espn
 import interstate75
 import jokes
 import mlb
+import nhl
 import ota
 import page
 import settings
+import teams
 import weather
 from board import AMBER, FONT, GOLD, GREY, RED, WHITE, Anim, Board, text_width
-from scores import (DAYS, LEAGUES, MONTHS, banner, game_key, importance, iso_to_epoch, local_now, make_view,
-                    marquee_parts, next_game_lines, next_sun, record_text, result_text, visible)
+from scores import (DAYS, LEAGUES, MONTHS, ORIGINAL, SPORT_INDEX, SPORTS, apply_teams, banner, follow_entry, followed, game_key, importance, iso_to_epoch, local_now, make_view,
+                    marquee_parts, next_game_lines, next_sun, record_text, result_text, sun_today, visible)
 from secrets import WIFI_PASSWORD, WIFI_SSID
 
 log = settings.log
@@ -51,9 +53,16 @@ BRIGHT_STEPS = (0, 10, 25, 50, 100)  # web page choices; 0 = automatic by time o
 SLIDE_REGION = (0, 24)
 TICKER_REGION = (25, 32)
 FRAME_MS = 30
+SETTING_KEYS = ("display", "mode", "bright", "cameos", "lat", "lon", "tz", "qs", "qe", "sunbright",
+                "team_baseball", "team_football", "team_hockey", "team_basketball", "team_soccer")
 MODES = ("NORMAL", "CLOCK", "ART")  # button B cycles these; button A plays a cameo now
 WDT_MS = 8000           # hardware watchdog: reboot if the display loop stalls this long
 STALE_MS = 15 * 60 * 1000  # reboot if the network worker delivers nothing for this long
+STALE_DATA_MS = 120 * 1000  # a live game's score older than this gets the amber status pixel
+MEM_LOG_EVERY = 30 * 60 * 1000  # free memory goes in the log this often (a slow leak shows up as a trend)
+RESTART_HOUR = 4        # a restart at 4 AM local, when nothing is on screen, clears memory fragmentation
+RESTART_AFTER = 6 * 3600  # ...but only if the board has been up at least this long
+CLOSE_MS = 450          # close games redraw this often so the corner lights pulse
 
 
 i75 = interstate75.Interstate75(display=DISPLAY)
@@ -146,13 +155,25 @@ def unquote(s):
     return out.decode()
 
 
-def brightness_for(hour):
-    """Dim the panel in the evening and a lot overnight (or a fixed level chosen on the web page)."""
+def brightness_for(hour, now=None):
+    """0 = dark. Quiet hours and the display switch turn the panel off; otherwise a fixed level from the web
+    page, or automatic: full in daylight, dimmer from an hour before sunset, dim overnight (clock hours
+    when the sun times are off or unknown). `now` is the epoch time, for the sun."""
     if not settings.cfg["display"]:
+        return 0.0
+    if now is not None and settings.quiet_now(hour):
         return 0.0
     fixed = settings.cfg["bright"]
     if fixed:
         return fixed / 100
+    if now is not None and settings.cfg["sunbright"]:
+        rise, sset = sun_today(now)
+        if rise and sset:
+            if rise + 1800 <= now < sset - 3600:
+                return 1.0
+            if rise - 1800 <= now < sset + 3600:
+                return 0.6
+            return 0.25
     if 7 <= hour < 19:
         return 1.0
     if 19 <= hour < 22 or 6 <= hour < 7:
@@ -171,13 +192,18 @@ def sky_for(hour):
 
 # -- network worker (runs on core 1) -------------------------------------
 def job_poll(i):
-    league = LEAGUES[i]
+    """Scores for every team we follow in sport i."""
+    sport = SPORTS[i]
+    follows = [f for f in LEAGUES if f["sport"] == sport["sport"]]
     if not wifi_up():
         raise OSError("wifi")
-    if league["sport"] == "baseball":
-        games = mlb.fetch(league["mlb_team_id"])
+    if sport["sport"] == "baseball":
+        games = mlb.fetch([f["mlb_team_id"] for f in follows])
     else:
-        games = espn.fetch(league["sport"], league["path"], (league["abbr"],), league["early_exit"])
+        games = espn.fetch(sport["sport"], sport["path"], tuple(f["abbr"] for f in follows),
+                           sport["early_exit"] and len(follows) == 1)  # stop early only when one game is wanted
+        if sport["sport"] == "hockey":
+            nhl.add_live(games)  # shots on goal and power play for live games
     now = time.time()
     if any(g["state"] == "in" for g in games):
         wait = POLL_LIVE
@@ -185,12 +211,15 @@ def job_poll(i):
         wait = POLL_SOON
     else:
         wait = POLL_IDLE
-    print("poll", league["nick"], [(g["name"], g["state"], g["away_score"], g["home_score"]) for g in games])
+    print("poll", sport["sport"], [(g["name"], g["state"], g["away_score"], g["home_score"]) for g in games])
     return games, wait
 
 
 def job_next(i):
-    league = LEAGUES[i]
+    """One followed team's next game; i is (sport, abbreviation)."""
+    league = follow_entry(*i)
+    if league is None:
+        raise OSError("not followed any more")
     if not wifi_up():
         raise OSError("wifi")
     nx = espn.next_event(league["path"], league["team_slug"])
@@ -200,14 +229,14 @@ def job_next(i):
 
 def job_all(i):
     """League-wide scoreboard for the idle ticker (every team, not just ours)."""
-    league = LEAGUES[i]
+    sport = SPORTS[i]
     if not wifi_up():
         raise OSError("wifi")
-    if league["sport"] == "baseball":  # ESPN has no runners/outs/count; MLB does
+    if sport["sport"] == "baseball":  # ESPN has no runners/outs/count; MLB does
         games = mlb.fetch_all()
     else:
-        games = espn.fetch(league["sport"], league["path"], None, False)
-    print("league", league["sport"], len(games), "games")
+        games = espn.fetch(sport["sport"], sport["path"], None, False)
+    print("league", sport["sport"], len(games), "games")
     live = any(g["state"] == "in" and importance(g) for g in games)
     return games, ALL_LIVE if live else ALL_REFRESH
 
@@ -233,12 +262,12 @@ PRIORITY = {"poll": 0, "all": 1, "next": 2, "wx": 3, "ntp": 3}  # live scores be
 class Scoreboard:
     def __init__(self):
         self.inbox = []      # finished network jobs, applied by drain()
-        self.due = {}        # (job kind, league index) -> ticks_ms when it is next due
-        self.data = {}       # league index -> list of games from the last good poll
-        self.upcoming = {}   # league index -> next scheduled game (for the idle screen)
+        self.due = {}        # (job kind, sport index; or (sport, abbreviation) for "next") -> ticks_ms when it is next due
+        self.data = {}       # sport index -> games of the teams we follow, from the last good poll
+        self.upcoming = {}   # (sport, abbreviation) -> that team's next scheduled game (for the idle screen)
         self.slide = -1
         self.slide_drawn = None  # which slide is on screen (None = redraw it)
-        self.all_games = {}  # league index -> every game in that league's scoreboard
+        self.all_games = {}  # sport index -> every game in that sport's scoreboard
         self.weather = None  # (icon kind, "54F")
         self.ticker = []
         self.ticker_width = 0
@@ -269,9 +298,13 @@ class Scoreboard:
         self.job = "-"       # the network job in progress (for stall reports)
         self.worst_gap = 0   # how late the display has been for a frame, since the last report
         self.report_due = time.ticks_add(time.ticks_ms(), 60000)
+        self.team_gen = [0] * len(SPORTS)  # bumps when the teams followed in a sport change, so old results are dropped
         self.fails = {}      # (job kind, league) -> failures in a row, for the status pixel
         self.net_ok = True
         self.net_check = 0
+        self.fresh = {}      # sport index -> ticks_ms of the last good score read (poll or league-wide)
+        self.boot_epoch = None  # time.time() once the clock is right, for the daily restart
+        self.mem_due = time.ticks_add(time.ticks_ms(), MEM_LOG_EVERY)
         self.cache_due = time.ticks_add(time.ticks_ms(), 5 * 60000)
 
     # -- finished network jobs ---------------------------------------------
@@ -279,16 +312,18 @@ class Scoreboard:
         while self.inbox:
             self.last_result = time.ticks_ms()
             kind, i, ok, value = self.inbox.pop(0)
+            if kind in ("poll", "all"):
+                self.fresh[i] = self.last_result
             if kind == "poll":
-                self.note_clocks(LEAGUES[i], value)
-                self.detect_changes(LEAGUES[i], value)
+                self.note_clocks(SPORTS[i], value)
+                self.detect_changes(SPORTS[i], value)
                 self.data[i] = value
                 self.refresh_views()
             elif kind == "next":
                 self.upcoming[i] = value
             elif kind == "all":
-                self.note_clocks(LEAGUES[i], value)
-                self.detect_changes(LEAGUES[i], [g for g in value if importance(g)])
+                self.note_clocks(SPORTS[i], value)
+                self.detect_changes(SPORTS[i], [g for g in value if importance(g)])
                 self.all_games[i] = value
                 self.refresh_views()
                 self.ticker_stale = True
@@ -296,31 +331,39 @@ class Scoreboard:
                 self.weather = value
             elif kind == "ntp":
                 self.clock_ok = True
+                if self.boot_epoch is None:
+                    self.boot_epoch = time.time()
             self.dirty = True
 
     def detect_changes(self, league, games):
+        """Score changes and game results. `league` only says which sport; each game is judged from the
+        side of whichever followed team is in it."""
+        sport = league["sport"]
         for g in games:
-            key = game_key(league["sport"], g)
+            key = game_key(sport, g)
             now_scores = (g["away_score"], g["home_score"])
             old = self.scores.get(key)
             old_state = self.states.get(key)
             self.scores[key] = now_scores
             self.states[key] = g["state"]
             if old_state == "in" and g["state"] == "post":
-                ours = "away" if g["away"] == league["abbr"] else "home" if g["home"] == league["abbr"] else None
-                mine, theirs = (now_scores if ours == "away" else now_scores[::-1])
+                ours = "away" if followed(sport, g["away"]) else "home" if followed(sport, g["home"]) else None
+                away_pts, home_pts = now_scores  # (MicroPython can't reverse a tuple with [::-1])
+                mine, theirs = (away_pts, home_pts) if ours == "away" else (home_pts, away_pts)
                 if ours and mine != theirs:
                     won = mine > theirs
-                    self.anims.append(Anim(key, league["sport"], league["color"], result_text(won, mine, theirs),
+                    self.anims.append(Anim(key, sport, follow_entry(sport, g[ours])["color"], result_text(won, mine, theirs),
                                            True, 150, "win" if won else "loss"))
             if old is None or g["state"] == "pre":
                 continue
+            if sport == "basketball":
+                continue  # baskets come every half minute: no banner for each one (the final result still gets one)
             for side, o, n in (("away", old[0], now_scores[0]), ("home", old[1], now_scores[1])):
                 if n > o:
                     text, ours = banner(league, g, side, n - o)
-                    a = Anim(key, league["sport"], league["color"] if ours else GREY, text, ours)
-                    if ours:
-                        a.cameo = critters.scoring(league["sport"], n - o)
+                    a = Anim(key, sport, follow_entry(sport, g[side])["color"] if ours else GREY, text, ours)
+                    if ours and (sport, g[side]) in ORIGINAL:  # the celebrations are drawn for those teams
+                        a.cameo = critters.scoring(sport, n - o)
                         if a.cameo:
                             a.total = a.cameo.total
                     self.anims.append(a)
@@ -358,9 +401,9 @@ class Scoreboard:
 
     def refresh_views(self):
         now = time.time()
-        pairs = visible([(LEAGUES[i], self.data.get(i, [])) for i in range(len(LEAGUES))],
+        pairs = visible([(SPORTS[i], self.data.get(i, [])) for i in range(len(SPORTS))],
                         now, self.clock_ok,
-                        [(LEAGUES[i], self.all_games.get(i, [])) for i in range(len(LEAGUES))])
+                        [(SPORTS[i], self.all_games.get(i, [])) for i in range(len(SPORTS))])
         self.shown = pairs
         self.ticking = False
         now_ms = time.ticks_ms()
@@ -369,7 +412,7 @@ class Scoreboard:
 
     def build_ticker(self):
         """Scores plus a joke. Rebuilt only when the ticker has scrolled off, so it never jumps."""
-        scores = marquee_parts([(LEAGUES[i], self.all_games.get(i, [])) for i in range(len(LEAGUES))],
+        scores = marquee_parts([(SPORTS[i], self.all_games.get(i, [])) for i in range(len(SPORTS))],
                                time.time(), self.clock_ok)
         text, color = jokes.next_joke(self.joke)
         self.joke = text
@@ -398,8 +441,9 @@ class Scoreboard:
         """No games on: clock or a team's next game on top (rotating), scores and jokes scrolling below."""
         now = time.time()
         n = len(LEAGUES)
-        idx = 0 if self.mode == 1 else self.slide % (n + 2)  # slide 0 is the clock, the last is the sun
         lt = local_now(now)
+        notes = settings.active_reminders(lt) if self.clock_ok else []
+        idx = 0 if self.mode == 1 else self.slide % (n + 2 + len(notes))  # 0 is the clock, then the teams, the sun, the reminders
         if idx == 0:
             fx = self.weather[0] if self.weather else None
             moving = fx in ("rain", "snow", "storm")
@@ -423,11 +467,26 @@ class Scoreboard:
                 board.draw_message(lines, SLIDE_REGION)
                 board.rect(0, SLIDE_REGION[1], board.w, 1, (35, 35, 35))
                 self.slide_drawn = (idx, lt[4])
+        elif idx > n + 1:  # a reminder
+            text = notes[idx - n - 2]
+            if self.slide_drawn != (idx, text):
+                lines = [("REMINDER", GOLD)]
+                words, cur = text.split(), ""
+                for w in words:
+                    if cur and text_width(cur + " " + w) > board.w - 2:
+                        lines.append((cur, WHITE))
+                        cur = w
+                    else:
+                        cur = (cur + " " + w) if cur else w
+                lines.append((cur, WHITE))
+                board.draw_message(lines[:3], SLIDE_REGION)
+                board.rect(0, SLIDE_REGION[1], board.w, 1, (35, 35, 35))
+                self.slide_drawn = (idx, text)
         elif self.slide_drawn != idx:  # team slides only change every few seconds
             i = idx - 1
             league = LEAGUES[i]
             lines = [(league["nick"], league["color"])]
-            nx = self.upcoming.get(i)
+            nx = self.upcoming.get((league["sport"], league["abbr"]))
             if nx and (not self.clock_ok or iso_to_epoch(nx["date"]) > now - 3600):
                 rec = record_text(nx)
                 if rec and text_width(league["nick"] + " " + rec) <= board.w - 2:
@@ -441,14 +500,33 @@ class Scoreboard:
             self.slide_drawn = idx
         board.draw_marquee(self.ticker, self.offset, TICKER_REGION)
 
+    def data_stale(self, now):
+        """True when a live game on screen has not had a good score read for STALE_DATA_MS."""
+        for league, g in self.shown:
+            if g["state"] == "in":
+                t = self.fresh.get(SPORT_INDEX[league["sport"]])
+                if t is not None and time.ticks_diff(now, t) > STALE_DATA_MS:
+                    return True
+        return False
+
+    def pulse(self):
+        """Gold corner lights, blinking, while a game on screen is close and late."""
+        if time.ticks_ms() // 500 % 2 and any(v.get("close") for v in self.views):
+            board._clip = (0, board.h)
+            for x, y, dx, dy in ((0, 0, 1, 1), (board.w - 1, 0, -1, 1), (0, board.h - 1, 1, -1),
+                                 (board.w - 1, board.h - 1, -1, -1)):
+                for px, py in ((x, y), (x + dx, y), (x, y + dy)):
+                    board.rect(px, py, 1, 1, GOLD)
+
     def flush(self):
         """Show the frame, with one pixel in the top right corner when something is wrong:
-        red = no WiFi, amber = a data source keeps failing."""
+        red = no WiFi, amber = a data source keeps failing or a live score is stale."""
         now = time.ticks_ms()
         if time.ticks_diff(now, self.net_check) >= 0:
             self.net_ok = wlan.isconnected()
             self.net_check = time.ticks_add(now, 2000)
-        bad = RED if not self.net_ok else AMBER if any(n >= 3 for n in self.fails.values()) else None
+        bad = RED if not self.net_ok else AMBER if (
+            any(n >= 3 for n in self.fails.values()) or self.data_stale(now)) else None
         if bad:
             board._clip = (0, board.h)
             board.rect(board.w - 1, 0, 1, 1, bad)
@@ -483,21 +561,24 @@ class Scoreboard:
             self.cameo = None
             self.slide_drawn = None
             board.draw_games(self.views)
+            self.pulse()
         elif self.cameo:
             self.slide_drawn = None  # a cameo repaints the whole panel
             hour = local_now(time.time())[3] if self.clock_ok else 12
             self.cameo.draw(board, sky_for(hour))
             if self.cameo.done:
                 self.cameo = None
+                critters.release()  # frees the memory of an extra cameo's file
         else:
             self.idle_screen()
         self.flush()
         self.last_draw = time.ticks_ms()
 
     # -- buttons, night mode, cameos -----------------------------------
-    def start_cameo(self):
+    def start_cameo(self, name=None):
         lt = local_now(time.time())
-        self.cameo = critters.pick(lt[1], lt[2])
+        self.cameo = (name and critters.make(name)) or critters.pick(
+            lt[1], lt[2], [(l["sport"], l["abbr"]) for l in LEAGUES])
         lo, hi = CAMEO_RATES[settings.cfg["cameos"]]
         wait = random.randint(lo, hi) if hi else 3600  # "off" still checks back every hour
         self.cameo_due = time.ticks_add(time.ticks_ms(), wait * 1000)
@@ -523,7 +604,8 @@ class Scoreboard:
     def look(self):
         """Once in a while: brightness for the time of day."""
         if (self.clock_ok or settings.cfg["bright"] or not settings.cfg["display"]) and time.ticks_diff(time.ticks_ms(), self.look_due) >= 0:
-            board.set_brightness(brightness_for(local_now(time.time())[3] if self.clock_ok else 12))
+            now = time.time() if self.clock_ok else None
+            board.set_brightness(brightness_for(local_now(now)[3] if now else 12, now))
             self.slide_drawn = None
             self.look_due = time.ticks_add(time.ticks_ms(), 60000)
 
@@ -533,6 +615,15 @@ class Scoreboard:
             print("display: worst frame delay", self.worst_gap, "ms; free", gc.mem_free())
             self.worst_gap = 0
             self.report_due = time.ticks_add(now_ms, 60000)
+        if time.ticks_diff(now_ms, self.mem_due) >= 0:
+            gc.collect()
+            log("mem free", gc.mem_free() // 1024, "KB")
+            self.mem_due = time.ticks_add(now_ms, MEM_LOG_EVERY)
+        if (self.boot_epoch and not self.views and not self.anims and not _wdt_off()
+                and time.time() - self.boot_epoch > RESTART_AFTER and local_now(time.time())[3] == RESTART_HOUR):
+            log("daily restart")
+            settings.save_log()
+            machine.reset()
         if time.ticks_diff(now_ms, self.last_result) > STALE_MS and not _wdt_off():
             log("no network results for 15 min; rebooting")
             settings.save_log()
@@ -549,7 +640,8 @@ class Scoreboard:
             return
         settings.save_cache({
             "t": int(time.time()),
-            "up": {str(i): v for i, v in self.upcoming.items()},
+            "teams": ["%s:%s" % (l["sport"], l["abbr"]) for l in LEAGUES],
+            "up": {"%s:%s" % k: v for k, v in self.upcoming.items()},
             "wx": self.weather,
             "all": {str(i): [g for g in v if g["state"] != "in"] for i, v in self.all_games.items()},
         })
@@ -560,7 +652,9 @@ class Scoreboard:
         if not c or not self.clock_ok or abs(time.time() - c.get("t", 0)) > 6 * 3600:
             return
         try:
-            self.upcoming = {int(i): v for i, v in c.get("up", {}).items()}
+            if c.get("teams") != ["%s:%s" % (l["sport"], l["abbr"]) for l in LEAGUES]:  # saved for other teams
+                return
+            self.upcoming = {tuple(k.split(":")): v for k, v in c.get("up", {}).items()}
             self.all_games = {int(i): v for i, v in c.get("all", {}).items()}
             wx = c.get("wx")
             self.weather = (wx[0], wx[1]) if wx else None
@@ -580,10 +674,33 @@ class Scoreboard:
             d["info"] = "%s - %d games on screen - %d KB free" % (
                 "WiFi ok" if self.net_ok else "NO WIFI", len(self.views), gc.mem_free() // 1024)
             return 200, json.dumps(d), "application/json"
-        if path not in ("/", "/ui", "/set"):
+        if path == "/teams":  # the choices for one league: [[abbreviation, full name], ...]
+            return 200, json.dumps([[r[2], r[0]] for r in teams.TEAMS.get(q.get("sport"), ())]), "application/json"
+        if path == "/export":  # the settings as a file, to keep or to paste into /import after a reflash
+            return 200, json.dumps(settings.cfg), "application/json"
+        if path == "/reminders":
+            return 200, json.dumps(settings.reminders), "application/json"
+        if path == "/rem_add":
+            try:
+                settings.add_reminder(unquote(q.get("text", "")), q.get("date", ""), unquote(q.get("time", "")), q.get("rep", 0))
+            except (ValueError, TypeError):
+                return 400, "not valid (10 at most, needs text and a date)", "text/plain"
+            self.slide_drawn = None
+            return 200, "ok", "text/plain"
+        if path == "/rem_del":
+            ok = settings.delete_reminder(int(q["i"]) if q.get("i", "").isdigit() else -1)
+            self.slide_drawn = None
+            return (200, "ok", "text/plain") if ok else (400, "no such reminder", "text/plain")
+        if path not in ("/", "/ui", "/set", "/import"):
             return None
         changed = False
-        for key in ("display", "mode", "bright", "cameos", "lat", "lon", "tz"):
+        if path == "/import":
+            n = settings.import_json(unquote(q.get("json", "")))
+            q = dict(settings.cfg, **{k: v for k, v in q.items() if k == "k"})  # apply everything below
+            if not n:
+                return 400, "nothing imported", "text/plain"
+            changed = True
+        for key in SETTING_KEYS:
             if key in q and settings.set_value(key, q[key]):
                 changed = True
         if changed:
@@ -595,11 +712,12 @@ class Scoreboard:
                 self.due[("wx", 0)] = time.ticks_ms()  # weather for the new place
             if "mode" in q:
                 self.cameo = None
+            self.follow()
         if "cameo" in q and not self.views:
-            self.start_cameo()
+            self.start_cameo(q["cameo"] if q["cameo"].isalpha() else None)  # ?cameo=1 plays any; ?cameo=Rocket that one
         if q.get("msg"):
             self.say(unquote(q["msg"]))
-        if path == "/set":
+        if path in ("/set", "/import"):
             return 200, "ok", "text/plain"
         return 200, self.page(q.get("k", "")), "text/html"
 
@@ -613,14 +731,41 @@ class Scoreboard:
             self.ticker += [("|", (90, 90, 90)), (text, (255, 120, 200)), ("|", (90, 90, 90))]
             self.ticker_width = board.marquee_width(self.ticker)
 
+    def follow(self):
+        """Make LEAGUES follow the teams in settings. A sport whose teams changed forgets its old games."""
+        now = time.ticks_ms()
+        for s in apply_teams():
+            sport = SPORTS[s]["sport"]
+            self.team_gen[s] += 1
+            self.data.pop(s, None)
+            self.anims = [a for a in self.anims if a.key[0] != sport]
+            self.fails.pop(("poll", s), None)
+            if self.due:
+                self.due[("poll", s)] = now
+            log("following", sport, ",".join(f["abbr"] for f in LEAGUES if f["sport"] == sport))
+        keys = [(f["sport"], f["abbr"]) for f in LEAGUES]
+        for k in list(self.upcoming):
+            if k not in keys:
+                del self.upcoming[k]
+        if self.due:  # a next-game lookup for each team followed now, none for the ones dropped
+            for k in list(self.due):
+                if k[0] == "next" and k[1] not in keys:
+                    del self.due[k]
+                    self.fails.pop(k, None)
+            for k in keys:
+                self.due.setdefault(("next", k), now)
+        self.slide_drawn = None
+        self.dirty = True
+
     # -- network jobs ----------------------------------------------------
     def schedule_jobs(self):
         now = time.ticks_ms()
         self.due = {("ntp", 0): time.ticks_add(now, NTP_REFRESH * 1000), ("wx", 0): now}
-        for i in range(len(LEAGUES)):
-            self.due[("poll", i)] = now
-            self.due[("next", i)] = now
-            self.due[("all", i)] = time.ticks_add(now, 20000 * (i + 1))
+        for s in range(len(SPORTS)):
+            self.due[("poll", s)] = now
+            self.due[("all", s)] = time.ticks_add(now, 20000 * (s + 1))
+        for f in LEAGUES:
+            self.due[("next", (f["sport"], f["abbr"]))] = now
 
     def run_job(self):
         """Run the most important job that is due (at most one per call)."""
@@ -630,16 +775,27 @@ class Scoreboard:
             return
         key = min(ready, key=lambda k: PRIORITY[k[0]])
         kind, i = key
-        self.job = "%s%d" % (kind, i)
+        self.job = "%s%s" % (kind, i if isinstance(i, int) else ":".join(i))
+        gen = self.team_gen[i] if kind == "poll" else 0
         try:
             value, wait = JOBS[kind](i)
+            if kind == "poll" and gen != self.team_gen[i]:
+                raise OSError("teams changed mid-download")  # drop it; the new teams are fetched next
             self.inbox.append((kind, i, True, value))
             self.fails.pop(key, None)
         except Exception as e:  # network hiccup: keep the old data, retry soon
             self.fails[key] = self.fails.get(key, 0) + 1
             log(kind, i, "failed:", repr(e))
-            wait = 10 if kind == "poll" else 60
-        self.due[key] = time.ticks_add(time.ticks_ms(), wait * 1000)
+            n = min(self.fails[key], 6)  # back off: 10 s, 20, 40, 80, 120 for scores; 1 min up to 15 for the rest
+            wait = min(10 << (n - 1), 120) if kind == "poll" else min(60 << (n - 1), 900)
+        if kind == "poll" and gen != self.team_gen[i]:
+            wait = 0  # different teams now: fetch again straight away
+            self.fails.pop(key, None)
+        if kind == "next" and not followed(*i):
+            self.due.pop(key, None)  # unfollowed while it ran
+            self.fails.pop(key, None)
+        else:
+            self.due[key] = time.ticks_add(time.ticks_ms(), wait * 1000)
         self.job = "gc"
         t = time.ticks_ms()
         gc.collect()
@@ -673,6 +829,7 @@ class Scoreboard:
             pause = min(pause * 2, 60)  # 5, 10, 20, 40, 60 seconds between tries
         message(("CLOCK...", WHITE))
         self.clock_ok = sync_clock()
+        self.follow()  # the teams chosen on the settings page
         self.load_cache()
         message(("LOADING", WHITE), ("SCORES", WHITE), (wlan.ifconfig()[0], GREY))
         for host in (espn.HOST, mlb.HOST, weather.HOST):  # look these up now, not mid-ticker
@@ -704,12 +861,16 @@ class Scoreboard:
             self.draw()
             delay = FRAME_MS
         elif self.views:
-            if self.dirty or time.ticks_diff(now_ms, self.last_draw) > (1000 if self.ticking else 20000):
+            close = any(v.get("close") for v in self.views)
+            if self.dirty or time.ticks_diff(now_ms, self.last_draw) > (
+                    CLOSE_MS if close else 1000 if self.ticking else 20000):
                 self.refresh_views()
                 self.draw()
                 self.dirty = False
             delay = 200
         else:  # idle: clock/teams on top, ticker below, cameos now and then
+            if not self.cameo:
+                critters.release()
             self.slide = int(time.time()) // SLIDE_SECONDS
             if self.dirty or time.ticks_diff(now_ms, self.last_refresh) > 60000:
                 self.refresh_views()

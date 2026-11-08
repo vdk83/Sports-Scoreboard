@@ -7,3 +7,4 @@ secrets.py
 *.tmp
 .DS_Store
 preview/
+settings_qr*

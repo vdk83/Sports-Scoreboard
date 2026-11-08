@@ -76,7 +76,13 @@ SAMPLE = dict(sport="baseball", name="SF @ LAD", date="2026-10-25", away="SF", a
 FOOT = dict(sport="football", name="KC @ SEA", date="2026-10-25", away="KC", away_score=17, home="SEA",
             home_score=24, clock="5:21", period=3, state="in", detail="5:21 - 3rd")
 HOCKEY = dict(sport="hockey", name="VAN @ SEA", date="2026-10-25", away="VAN", away_score=1, home="SEA",
-              home_score=2, clock="12:03", period=2, state="in", detail="12:03 - 2nd")
+              home_score=2, clock="12:03", period=2, state="in", detail="12:03 - 2nd", sog=(14, 21), pp="home", pp_on=True)
+
+
+NBA = dict(sport="basketball", name="LAL @ GS", date="2026-10-25", away="LAL", away_score=104, home="GS",
+           home_score=108, clock="5:21", period=4, state="in", detail="5:21 - 4th")
+MLS = dict(sport="soccer", name="POR @ SEA", date="2026-10-25", away="POR", away_score=1, home="LAFC",
+           home_score=2, clock="90'+3'", period=2, state="in", detail="90'+3'")
 
 
 def games():
@@ -86,6 +92,12 @@ def games():
         g, b = make()
         b.draw_games([make_view(l, gm, now) for l, gm in pairs[:n]])
         save(g, "games_%d" % n)
+    for tag, i, gm in (("baseball", 0, SAMPLE), ("football", 1, FOOT), ("hockey", 2, HOCKEY),
+                          ("basketball", 3, NBA), ("soccer", 4, MLS)):
+        for n in (1, 2, 3):
+            g, b = make()
+            b.draw_games([make_view(LEAGUES[i], gm, now)] * n)
+            save(g, "games_%s_%d" % (tag, n))
 
 
 def clock():

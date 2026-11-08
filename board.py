@@ -149,16 +149,32 @@ class Board:
         return (v["color"] if ours == "away" else WHITE,
                 v["color"] if ours == "home" else WHITE)
 
+    def _pips(self, quarter, x, y):
+        """Four small squares for the quarters of a football game; the ones played so far are lit."""
+        for i in range(4):
+            self.rect(x + i * 4, y, 3, 3, GOLD if i < quarter else ABS_OFF)
+
     def _draw_full(self, v, y0):
+        hk = v.get("hockey")
         self.text(1, y0 + 1, v["status"], v["status_color"])
-        if v.get("tag"):
+        if hk and hk["pp_on"]:
+            self.text(self.w - 1 - text_width("PP"), y0 + 1, "PP", RED)
+        elif v.get("quarter"):
+            self._pips(v["quarter"], self.w - 16, y0 + 2)
+        elif v.get("tag"):
             self.text(self.w - 1 - text_width(v["tag"]), y0 + 1, v["tag"], GOLD)
         ca, ch = self._side_colors(v)
-        for k, (label, score, col) in enumerate(
-                ((v["away"], v["away_score"], ca), (v["home"], v["home_score"], ch))):
+        for k, (side, label, score, col) in enumerate(
+                (("away", v["away"], v["away_score"], ca), ("home", v["home"], v["home_score"], ch))):
             y = y0 + 8 + k * 12
             self.rect(0, y, 1, 10, col if col != WHITE else GREY)
             self.text(4, y, label, col, 2)
+            if hk:
+                i = k
+                pp = hk["pp"] == side
+                if pp:
+                    self.rect(1, y, 1, 10, RED)
+                self.text(31, y + 3, "%d SOG" % hk["sog"][i], RED if pp else GREY)
             if score is not None:
                 s = str(score)
                 self.text(self.w - 1 - text_width(s, 2), y, s, WHITE, 2)
@@ -207,12 +223,12 @@ class Board:
                 self._abs_squares(32, y + 1, live["abs"][side], v["color"] if v["ours"] == side else WHITE,
                                   3, 1, False)
         b = live["bases"]
-        for on, x, y in ((b[1], 54, 1), (b[2], 50, 4), (b[0], 58, 4)):
-            self.rect(x, y0 + y, 2, 2, YELLOW if on else BASE_OFF)
+        for on, x, y in ((b[1], 56, 3), (b[2], 52, 7), (b[0], 60, 7)):
+            self._plus(x, y0 + y - 1, YELLOW if on else BASE_OFF)
         for i in range(3):
-            self.rect(50 + i * 4, y0 + 8, 2, 1, OUT_ON if i < live["outs"] else OUT_OFF)
+            self.rect(52 + i * 4, y0 + 9, 3, 1, OUT_ON if i < live["outs"] else OUT_OFF)
         st = v["status"]
-        self.text(self.w - 1 - text_width(st), y0 + 10, st, v["status_color"])
+        self.text(self.w - 1 - text_width(st), y0 + 11, st, v["status_color"])
 
     def _draw_half(self, v, y0):
         ca, ch = self._side_colors(v)
@@ -224,7 +240,15 @@ class Board:
             parts += [(str(v["home_score"]), WHITE)]
         self.segments(1, y0 + 2, parts)
         self.text(1, y0 + 9, v["status"], v["status_color"])
-        if v.get("tag"):
+        hk = v.get("hockey")
+        if hk:
+            sog = "%d-%d" % tuple(hk["sog"])
+            self.text(self.w - 1 - text_width(sog), y0 + 2, sog, GREY)
+            if hk["pp_on"]:
+                self.text(self.w - 1 - text_width("PP"), y0 + 9, "PP", RED)
+        elif v.get("quarter"):
+            self._pips(v["quarter"], self.w - 16, y0 + 10)
+        elif v.get("tag"):
             self.text(self.w - 1 - text_width(v["tag"]), y0 + 9, v["tag"], GOLD)
 
     def _draw_compact(self, v, y0, y1):
@@ -236,9 +260,17 @@ class Board:
         if v["home_score"] is not None:
             parts += [(str(v["home_score"]), WHITE)]
         used = sum(text_width(s) + 4 for s, _ in parts)
-        if used + text_width(v["short"]) <= self.w:
-            parts.append((v["short"], v["status_color"]))
-        self.segments(1, y0 + (y1 - y0 - 5) // 2 + 1, parts)
+        room = self.w - 2 - (11 if "live" in v else 0)  # a live baseball game keeps its corner for the runners
+        for text in (v["status"], v["short"], v["short"].split()[0]):  # the longest that fits
+            if used + text_width(text) <= room:
+                parts.append((text, v["status_color"]))
+                break
+        y = y0 + (y1 - y0 - 5) // 2 + 1
+        self.segments(1, y, parts)
+        if "live" in v:
+            b = v["live"]["bases"]
+            for on, x, dy in ((b[1], 57, 0), (b[2], 54, 3), (b[0], 60, 3)):
+                self.rect(x, y + dy, 2, 2, YELLOW if on else BASE_OFF)
 
     def draw_message(self, lines, region=None, backdrop=None):
         """Centred lines of (text, colour), inside region (y0, y1) or the whole panel."""

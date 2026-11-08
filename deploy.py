@@ -13,8 +13,10 @@ import sys
 import time
 
 HERE = os.path.dirname(os.path.abspath(__file__))
-FILES = ["espn.py", "mlb.py", "board.py", "critters.py", "jokes.py", "weather.py", "scores.py", "ota.py",
-         "settings.py", "sun.py", "page.py", "app.py", "demo.py", "cameo_demo.py"]
+FILES = ["espn.py", "mlb.py", "nhl.py", "board.py", "critters.py", "jokes.py", "weather.py", "scores.py", "ota.py",
+         "settings.py", "sun.py", "teams.py", "page.py", "app.py", "demo.py", "cameo_demo.py",
+         "extras_space.py", "extras_fun.py", "extras_sports.py", "extras_winter.py", "extras_winter2.py",
+         "extras_spring.py", "extras_summer.py", "extras_summer2.py", "extras_fall.py", "extras_fall2.py"]
 PORT = 8080
 
 

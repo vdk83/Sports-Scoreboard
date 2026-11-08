@@ -44,7 +44,7 @@ def _str(rec, key, pos=0):
     return rec[i:j].decode(), j
 
 
-def parse_event(rec, date, sport):
+def parse_event(rec, date, sport, eid=""):
     """Pull the fields we care about out of one event's raw JSON bytes."""
     name, p = _str(rec, ANCHOR)
     if name is None:
@@ -87,6 +87,7 @@ def parse_event(rec, date, sport):
             note = _str(rec, b'"headline":"', n)[0] or ""
     return {
         "sport": sport,
+        "id": eid,
         "name": name,
         "date": date,
         "away": teams["away"][0],
@@ -134,7 +135,9 @@ def _scan(read, sport, wanted, stop_after_first):
             if wanted is None or any(t.encode() in name.split() for t in wanted):
                 d = buf.rfind(b'"date":"', 0, a0)
                 date = buf[d + 8:d + 25].decode() if d >= 0 else ""
-                g = parse_event(rec, date, sport)
+                i = buf.rfind(b'"id":"', 0, d) if d >= 0 else -1
+                eid = buf[i + 6:buf.find(b'"', i + 6)].decode() if i >= 0 else ""
+                g = parse_event(rec, date, sport, eid)
                 if g:
                     games.append(g)
                     if stop_after_first:

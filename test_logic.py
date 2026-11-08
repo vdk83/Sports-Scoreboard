@@ -15,7 +15,7 @@ import settings  # noqa: E402
 import sun  # noqa: E402
 from scores import LEAGUES, banner, importance, local_time_str, make_view, marquee_parts, status_text, tag, visible  # noqa: E402
 
-LAD, SEA_NFL, SEA_NHL = LEAGUES
+LAD, SEA_NFL, SEA_NHL = LEAGUES[:3]  # the first three; basketball and soccer follow after them
 
 
 def game(**kw):
@@ -187,6 +187,72 @@ class Settings(unittest.TestCase):
             settings.log("line", i)
         self.assertLessEqual(len(settings._lines), settings.LOG_LINES)
         self.assertTrue(settings._lines[-1].endswith("line 99"))
+
+
+class QuietAndClose(unittest.TestCase):
+    def setUp(self):
+        settings.cfg.update(settings.DEFAULTS)
+
+    def test_quiet_hours_wrap_midnight(self):
+        settings.cfg["qs"], settings.cfg["qe"] = 22, 6
+        self.assertTrue(settings.quiet_now(23))
+        self.assertTrue(settings.quiet_now(5))
+        self.assertFalse(settings.quiet_now(6))
+        self.assertFalse(settings.quiet_now(12))
+        settings.cfg["qs"] = settings.cfg["qe"] = 3
+        self.assertFalse(settings.quiet_now(3))
+
+    def test_import_ignores_bad_values(self):
+        self.assertEqual(settings.import_json('{"bright": 40, "lat": 999, "nope": 1}'), 1)
+        self.assertEqual(settings.cfg["bright"], 40)
+        self.assertEqual(settings.import_json("[1]"), 0)
+
+    def test_sun_today_is_ordered(self):
+        rise, sset = scores.sun_today(epoch(2026, 10, 31, 20))
+        self.assertLess(rise, sset)
+        self.assertEqual(scores.local_now(rise)[2], 31)
+
+    def test_is_close(self):
+        self.assertTrue(scores.is_close(game(period=4, home_score=20, away_score=14)))
+        self.assertFalse(scores.is_close(game(period=2, home_score=20, away_score=14)))
+        self.assertFalse(scores.is_close(game(period=4, home_score=30, away_score=14)))
+        self.assertTrue(scores.is_close(game(sport="hockey", period=3, home_score=2, away_score=3)))
+        self.assertTrue(scores.is_close(game(sport="baseball", period=9, home_score=2, away_score=2)))
+        self.assertFalse(scores.is_close(game(sport="baseball", period=7, home_score=2, away_score=2)))
+        self.assertFalse(scores.is_close(game(state="post", period=4)))
+
+    def test_live_hockey_and_football_views(self):
+        hk = make_view(LEAGUES[2], game(sport="hockey", period=2, clock="12:03", sog=(14, 21), pp="home", pp_on=True), 0)
+        self.assertEqual(hk["hockey"], {"sog": (14, 21), "pp": "home", "pp_on": True})
+        self.assertEqual(scores.short_status(game(sport="hockey", period=2, clock="12:03", pp_on=True), 0), "P2 PP")
+        self.assertNotIn("hockey", make_view(LEAGUES[2], game(sport="hockey", period=2), 0))  # no extras fetched
+        fb = make_view(LEAGUES[1], game(sport="football", period=3, clock="5:21"), 0)
+        self.assertEqual((fb["quarter"], fb["status"]), (3, "Q3 5:21"))
+        self.assertNotIn("quarter", make_view(LEAGUES[1], game(sport="football", period=5, clock="5:21"), 0))  # overtime
+
+    def test_basketball_and_soccer(self):
+        nba = dict(sport="basketball", state="in", detail="x", period=3, clock="5:21", away="LAL", home="GS", away_score=90, home_score=88)
+        self.assertEqual(status_text(nba, 0), "Q3 5:21")
+        self.assertEqual(status_text(dict(nba, period=5), 0), "OT 5:21")
+        self.assertEqual(status_text(dict(nba, period=6), 0), "2OT 5:21")
+        self.assertTrue(scores.is_close(dict(nba, period=4)))
+        mls = dict(sport="soccer", state="in", period=2, clock="67'", detail="67'", away="POR", home="SEA", away_score=1, home_score=1)
+        self.assertEqual(status_text(mls, 0), "67'")
+        self.assertEqual(status_text(dict(mls, detail="HT", clock="45'+2'"), 0), "HALFTIME")
+        self.assertTrue(scores.is_close(mls))
+        self.assertEqual(scores.banner(scores.SPORTS[4], mls, "home", 1)[0][:4], "GOAL")
+
+    def test_nhl_summary_and_situation(self):
+        import nhl
+        head = (b'{"boxscore":{"teams":[{"team":{"id":"10","abbreviation":"MTL","name":"x"},"statistics":['
+                b'{"name":"shotsTotal","abbreviation":"S","displayValue":"13"},'
+                b'{"name":"powerPlayOpportunities","abbreviation":"PPO","displayValue":"1"}]},'
+                b'{"team":{"id":"21","abbreviation":"TOR"},"statistics":['
+                b'{"name":"shotsTotal","abbreviation":"S","displayValue":"16"},'
+                b'{"name":"powerPlayOpportunities","abbreviation":"PPO","displayValue":"2"}]}]}')
+        self.assertEqual(nhl.parse_summary(head), [("MTL", 13, 1), ("TOR", 16, 2)])
+        self.assertTrue(nhl.power_play_on(b'{"powerPlay":true,"emptyNet":false}'))
+        self.assertFalse(nhl.power_play_on(b'{"powerPlay":false,"emptyNet":false}'))
 
 
 if __name__ == "__main__":

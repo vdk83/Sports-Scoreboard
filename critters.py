@@ -39,6 +39,23 @@ def hop(f, period, height):
     return int(4 * height * u * (1 - u))
 
 
+def sprite(b, x, y, rows, pal, flip=False, scale=1):
+    """Draw a little picture: rows of characters, each looked up in `pal` ('.' and spaces are see-through).
+    Runs of the same colour are drawn as one rectangle, so it stays cheap. scale=2 makes it twice as big."""
+    for j, row in enumerate(rows):
+        n = len(row)
+        i = 0
+        while i < n:
+            ch = row[n - 1 - i] if flip else row[i]
+            k = i + 1
+            while k < n and (row[n - 1 - k] if flip else row[k]) == ch:
+                k += 1
+            col = pal.get(ch)
+            if col is not None:
+                b.rect(x + i * scale, y + j * scale, (k - i) * scale, scale, col)
+            i = k
+
+
 class Cameo:
     total = 200
     months = None     # restrict to these months (1-12); None = the whole season
@@ -783,20 +800,129 @@ CAMEOS = {
 }
 HOLIDAYS = (Fireworks, XmasTree, Heart, Shamrock)
 TEAMS = (HawkFly, Flag12, KrakenTentacle, DodgerBall)
+TEAM_OF = {HawkFly: ("football", "SEA"), Flag12: ("football", "SEA"),
+           KrakenTentacle: ("hockey", "SEA"), DodgerBall: ("baseball", "LAD")}  # (sport, abbreviation) each one is about
+
+# The extra cameos live in their own files and are only loaded while one plays, so they cost no memory
+# the rest of the time. name -> (file, seasons or None for any, months or None, holiday dates or None).
+# (test_critters checks this table against the files; make_extras_table.py rewrites it.)
+EXTRAS = {
+    'Invaders': ('extras_space', None, None, None),
+    'Pacman': ('extras_space', None, None, None),
+    'Robot': ('extras_space', None, None, None),
+    'Rocket': ('extras_space', None, None, None),
+    'Ufo': ('extras_space', None, None, None),
+    'CatMouse': ('extras_fun', None, None, None),
+    'Dino': ('extras_fun', None, None, None),
+    'DogFetch': ('extras_fun', None, None, None),
+    'Pizza': ('extras_fun', None, None, None),
+    'Speaker': ('extras_fun', None, None, None),
+    'FieldGoal': ('extras_sports', None, None, None),
+    'HockeyGoal': ('extras_sports', None, None, None),
+    'HomeRun': ('extras_sports', None, None, None),
+    'Hoops': ('extras_sports', None, None, None),
+    'Trophy': ('extras_sports', None, None, None),
+    'HotCocoa': ('extras_winter', ('winter',), None, None),
+    'IceSkater': ('extras_winter', ('winter',), None, None),
+    'Sledding': ('extras_winter', ('winter',), None, None),
+    'SnowAngel': ('extras_winter', ('winter',), None, None),
+    'Fireplace': ('extras_winter2', ('winter',), None, None),
+    'Icicles': ('extras_winter2', ('winter',), None, None),
+    'NewYear': ('extras_winter2', ('winter',), None, (12, 30, 31)),
+    'Reindeer': ('extras_winter2', ('winter',), (12,), None),
+    'SnowballFight': ('extras_winter2', ('winter',), None, None),
+    'Bee': ('extras_spring', ('spring',), None, None),
+    'Bunny': ('extras_spring', ('spring',), (3, 4), None),
+    'Chick': ('extras_spring', ('spring',), None, None),
+    'FrogRain': ('extras_spring', ('spring',), None, None),
+    'Kite': ('extras_spring', ('spring',), None, None),
+    'Ladybug': ('extras_spring', ('spring',), None, None),
+    'Rainbow': ('extras_spring', ('spring',), None, None),
+    'Sailboat': ('extras_summer', ('summer',), None, None),
+    'Sandcastle': ('extras_summer', ('summer',), None, None),
+    'Seagull': ('extras_summer', ('summer',), None, None),
+    'Surfer': ('extras_summer', ('summer',), None, None),
+    'Watermelon': ('extras_summer', ('summer',), None, None),
+    'Campfire': ('extras_summer2', ('summer',), None, None),
+    'Crab': ('extras_summer2', ('summer',), None, None),
+    'Lemonade': ('extras_summer2', ('summer',), None, None),
+    'Palm': ('extras_summer2', ('summer',), None, None),
+    'ShootingStar': ('extras_summer2', ('summer',), None, None),
+    'AppleDrop': ('extras_fall', ('fall',), None, None),
+    'Geese': ('extras_fall', ('fall',), None, None),
+    'HarvestMoon': ('extras_fall', ('fall',), None, None),
+    'Scarecrow': ('extras_fall', ('fall',), None, None),
+    'Squirrel': ('extras_fall', ('fall',), None, None),
+    'Cauldron': ('extras_fall2', ('fall',), (10,), None),
+    'Mushrooms': ('extras_fall2', ('fall',), None, None),
+    'Skeleton': ('extras_fall2', ('fall',), (10,), None),
+    'Witch': ('extras_fall2', ('fall',), (10,), None),
+}
 
 _last = None
+_loaded = []
 
 
-def pick(month, day=1):
-    """A random cameo: today's holiday 40% of the time, one of our teams one time in four."""
+def _make(choice, fallback):
+    """The cameo for a pick: a class, or the name of an extra one to load from its file. If memory is short
+    (or the file fails to load) one of the always-loaded cameos in `fallback` plays instead."""
+    if isinstance(choice, str):
+        import gc
+        gc.collect()
+        try:
+            if gc.mem_free() < 90000:
+                raise MemoryError
+            module = EXTRAS[choice][0]
+            cls = getattr(__import__(module), choice)
+            if module not in _loaded:
+                _loaded.append(module)
+            return cls()
+        except (MemoryError, ImportError):
+            release()
+            choice = random.choice(fallback)
+    return choice()
+
+
+def make(name):
+    """A cameo by class name (for trying one from the settings page), or None."""
+    if name in EXTRAS:
+        return _make(name, [SnowmanWalk])
+    for pool in list(CAMEOS.values()) + [HOLIDAYS, TEAMS]:
+        for cls in pool:
+            if cls.__name__ == name:
+                return cls()
+    return None
+
+
+def release():
+    """Unload the extra-cameo files (and free their memory); call when a cameo is over."""
+    if _loaded:
+        import sys
+        for module in _loaded:
+            sys.modules.pop(module, None)
+        del _loaded[:]
+        import gc
+        gc.collect()
+
+
+def pick(month, day=1, followed=None):
+    """A random cameo: today's holiday 40% of the time, one of our teams one time in four.
+    `followed` is the [(sport, abbreviation)] being followed: team cameos only appear for those teams."""
     global _last
-    pool = [c for c in CAMEOS[season(month)] if c.months is None or month in c.months]
+    s = season(month)
+    pool = [c for c in CAMEOS[s] if c.months is None or month in c.months]
     holiday = [c for c in HOLIDAYS if c.dates[0] == month and c.dates[1] <= day <= c.dates[2]]
+    for name, (_, seasons, months, dates) in EXTRAS.items():
+        if dates:
+            if dates[0] == month and dates[1] <= day <= dates[2]:
+                holiday.append(name)
+        elif (seasons is None or s in seasons) and (months is None or month in months):
+            pool.append(name)
     r = random.randint(0, 99)
     if holiday and r < 40:
         pool = holiday
     elif r >= 75:
-        pool = TEAMS
-    pool = [c for c in pool if c is not _last] or pool
+        pool = [c for c in TEAMS if followed is None or TEAM_OF[c] in followed] or pool
+    pool = [c for c in pool if c is not _last and c != _last] or pool
     _last = random.choice(pool)
-    return _last()
+    return _make(_last, [c for c in CAMEOS[s] if c.months is None or month in c.months])
