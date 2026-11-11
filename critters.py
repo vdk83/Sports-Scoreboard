@@ -858,6 +858,9 @@ EXTRAS = {
     'Asteroids': ('extras_arcade', None, None, None),
     'Cubes': ('extras_arcade', None, None, None),
     'Tetris': ('extras_arcade', None, None, None),
+    'Life': ('extras_games', None, None, None),
+    'Pong': ('extras_games', None, None, None),
+    'Snake': ('extras_games', None, None, None),
 }
 
 _last = None

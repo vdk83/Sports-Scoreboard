@@ -38,6 +38,7 @@ log = settings.log
 
 DISPLAY = interstate75.DISPLAY_INTERSTATE75_64X32
 
+UPDATE_HOLD_MS = 20000  # how long after the last update file the UPDATING message stays up
 POLL_LIVE = 15        # seconds between checks while one of our teams is playing
 POLL_SOON = 60        # a game starts within the hour
 POLL_IDLE = 300       # nothing happening
@@ -346,6 +347,7 @@ class Scoreboard:
         self.last_result = time.ticks_ms()  # when a network job last succeeded
         self.ota = None
         self.ota_next = 0
+        self.updating = None  # while a WiFi update is arriving: when to stop holding the UPDATING message
         self.healthy_due = time.ticks_add(time.ticks_ms(), 90000)
         self.next_frame = time.ticks_ms()
         self.job = "-"       # the network job in progress (for stall reports)
@@ -1053,7 +1055,7 @@ class Scoreboard:
                 log("dns", host, "failed:", repr(e))
         espn.set_tick(self.tick)
         try:
-            self.ota = ota.start(feed, lambda: message(("UPDATING", AMBER), ("DONT UNPLUG", GREY)), self.web)
+            self.ota = ota.start(feed, self.show_update, self.web)
         except Exception as e:
             log("ota off:", repr(e))
         log("ip", wlan.ifconfig()[0])
@@ -1062,9 +1064,22 @@ class Scoreboard:
         self.worst_gap = 0
         self.loop()
 
+    def show_update(self):
+        """An update file is arriving: put UPDATING on the panel once and leave it alone until the update is over."""
+        if self.updating is None:
+            message(("UPDATING", AMBER), ("DONT UNPLUG", GREY))
+        self.updating = time.ticks_add(time.ticks_ms(), UPDATE_HOLD_MS)  # every file pushes this out
+
     def frame(self):
         """Draw one frame for whatever the board is showing and schedule the next one."""
         now_ms = time.ticks_ms()
+        if self.updating is not None:  # no scores between the files of an update: that made the panel flash
+            if time.ticks_diff(now_ms, self.updating) < 0:
+                self.next_frame = time.ticks_add(now_ms, 200)
+                return
+            self.updating = None  # the update stopped (or failed): back to normal
+            self.slide_drawn = None
+            self.dirty = True
         late = time.ticks_diff(now_ms, self.next_frame)
         if late > self.worst_gap:
             self.worst_gap = late

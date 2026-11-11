@@ -118,6 +118,27 @@ class AppTest(unittest.TestCase):
         self.sb.slide = 0
         self.sb.draw()
 
+    def test_update_message_is_drawn_once_and_not_overdrawn(self):
+        """During a WiFi update the panel keeps the UPDATING message: no scores drawn between the files."""
+        calls = []
+        real = app.message
+        app.message = lambda *lines: calls.append(lines[0][0])
+        try:
+            self.sb.show_update()
+            self.sb.show_update()  # the next file
+            self.assertEqual(calls, ["UPDATING"])
+            drawn = []
+            self.sb.draw = lambda: drawn.append(1)
+            self.sb.dirty = True
+            self.sb.next_frame = 0
+            self.sb.frame()
+            self.assertEqual(drawn, [])  # held
+            self.sb.updating = app.time.ticks_add(app.time.ticks_ms(), -1)  # the update stopped
+            self.sb.frame()
+            self.assertIsNone(self.sb.updating)
+        finally:
+            app.message = real
+
     def test_frames_run(self):
         self.sb.build_ticker()
         for _ in range(50):

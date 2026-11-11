@@ -17,7 +17,7 @@ FILES = ["espn.py", "mlb.py", "nhl.py", "news.py", "board.py", "critters.py", "j
          "settings.py", "sun.py", "teams.py", "logos.py", "logos_baseball.py", "logos_football.py", "logos_hockey.py",
          "logos_basketball.py", "logos_soccer.py", "page.py", "app.py", "demo.py", "cameo_demo.py",
          "extras_space.py", "extras_fun.py", "extras_sports.py", "extras_winter.py", "extras_winter2.py",
-         "extras_spring.py", "extras_summer.py", "extras_summer2.py", "extras_fall.py", "extras_fall2.py", "extras_arcade.py"]
+         "extras_spring.py", "extras_summer.py", "extras_summer2.py", "extras_fall.py", "extras_fall2.py", "extras_arcade.py", "extras_games.py"]
 PORT = 8080
 
 

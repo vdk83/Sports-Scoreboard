@@ -35,7 +35,7 @@ class Counting:
         assert 0 <= x and 0 <= y and x + w <= 64 and y + h <= 32 and w > 0 and h > 0, (x, y, w, h)  # Board clips
 
 
-MODULES = ("extras_space", "extras_fun", "extras_sports", "extras_winter", "extras_winter2", "extras_spring", "extras_summer", "extras_summer2", "extras_fall", "extras_fall2", "extras_arcade")
+MODULES = ("extras_space", "extras_fun", "extras_sports", "extras_winter", "extras_winter2", "extras_spring", "extras_summer", "extras_summer2", "extras_fall", "extras_fall2", "extras_arcade", "extras_games")
 
 
 def extra_classes():
