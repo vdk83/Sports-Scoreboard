@@ -19,6 +19,32 @@ LOOKBACK = 300  # event "date" sits just before its "shortName"
 ANCHOR = b'"shortName":"'
 
 
+_ACCENTS = {"á": "a", "à": "a", "â": "a", "ä": "a", "ã": "a", "å": "a", "é": "e", "è": "e", "ê": "e", "ë": "e",
+            "í": "i", "ì": "i", "î": "i", "ï": "i", "ó": "o", "ò": "o", "ô": "o", "ö": "o", "õ": "o", "ø": "o",
+            "ú": "u", "ù": "u", "û": "u", "ü": "u", "ñ": "n", "ç": "c", "ý": "y", "č": "c", "ć": "c", "š": "s",
+            "ž": "z", "ł": "l", "ń": "n", "ř": "r", "ś": "s", "ğ": "g", "ş": "s", "ı": "i"}
+_SUFFIXES = ("JR", "SR", "II", "III", "IV")
+
+
+def last_name(full):
+    """'Julio Rodríguez Jr.' -> 'RODRIGUEZ': the family name in capitals the panel's font can draw."""
+    if "\\u" in full:  # the feed escaped non-ASCII letters
+        try:
+            import json
+            full = json.loads('"%s"' % full)
+        except ValueError:
+            pass
+    parts = full.replace(",", " ").split()
+    while len(parts) > 1 and parts[-1].upper().strip(".") in _SUFFIXES:
+        parts.pop()
+    out = ""
+    for ch in (parts[-1] if parts else "").lower():
+        ch = _ACCENTS.get(ch, ch)
+        if "a" <= ch <= "z" or ch in "-'.":
+            out += ch
+    return out.upper()
+
+
 def _event_anchor(buf, start):
     # An event's shortName looks like "KC @ SEA" or "TOR VS BOS"; player
     # shortNames ("C. Williams") never contain " @ " or " VS ".
@@ -30,7 +56,7 @@ def _event_anchor(buf, start):
         if e < 0:
             return -1
         s = buf[a + 13:e]
-        if b" @ " in s or b" VS " in s:
+        if b" @ " in s or b" VS " in s or b" vs. " in s:  # hockey home games read "CAR vs. SEA"
             return a
         start = a + 13
 
@@ -50,18 +76,23 @@ def parse_event(rec, date, sport, eid=""):
     if name is None:
         return None
     teams = {}
+    ids = {}
     for _ in range(2):
         h = rec.find(b'"homeAway":"', p)
         if h < 0:
             return None
         side = "home" if rec[h + 12:h + 13] == b"h" else "away"
-        abbr, p = _str(rec, b'"abbreviation":"', h)
-        nxt = rec.find(b'"homeAway":"', p)
-        sc, q = _str(rec, b'"score":"', p)
+        nxt = rec.find(b'"homeAway":"', h + 12)  # this team's entry ends where the other one starts
+        tid, t = _str(rec, b'"team":{"id":"', h)
+        ids[tid] = side
+        # The abbreviation must come from inside "team": a record in the entry can also have an
+        # "abbreviation" ("Total"), and ESPN's soccer feed lists the records before the team.
+        abbr, p = _str(rec, b'"abbreviation":"', t)
+        sc, q = _str(rec, b'"score":"', h)  # the score may sit before or after the team
         if sc is None or (0 <= nxt < q):
             sc = "0"
         else:
-            p = q
+            p = max(p, q)
         teams[side] = (abbr, int(sc) if sc.isdigit() else 0)
     if len(teams) != 2:
         return None
@@ -85,6 +116,9 @@ def parse_event(rec, date, sport, eid=""):
         h = rec.find(b'"headline":"', n)
         if 0 <= h - n < 60:
             note = _str(rec, b'"headline":"', n)[0] or ""
+    qb = None
+    if sport == "football" and state == "in":
+        qb = _passing_leader(rec, ids)
     return {
         "sport": sport,
         "id": eid,
@@ -100,7 +134,25 @@ def parse_event(rec, date, sport, eid=""):
         "detail": detail or "",
         "playoff": playoff,
         "note": note,
+        "qb": qb,
     }
+
+
+def _passing_leader(rec, ids):
+    """The game's passing leader as (last name, passing yards, 'away'/'home'), or None."""
+    k = rec.find(b'"name":"passingYards","displayName":"Passing Leader"')
+    if k < 0:
+        return None
+    text, p = _str(rec, b'"displayValue":"', k)   # like "16/26, 242 YDS, 1 TD"
+    name, p = _str(rec, b'"shortName":"', p)
+    tid = _str(rec, b'"team":{"id":"', p)[0]
+    if not text or not name or tid not in ids:
+        return None
+    yds = ""
+    for part in text.split(","):
+        if part.strip().endswith("YDS"):
+            yds = part.strip().split()[0]
+    return (last_name(name), int(yds) if yds.isdigit() else 0, ids[tid])
 
 
 def _scan(read, sport, wanted, stop_after_first):
@@ -325,52 +377,94 @@ def fetch(sport, league_path, teams, stop_after_first=False):
 TEAM_PATH = "/apis/site/v2/sports/%s/teams/%s"
 
 
-def next_event(league_path, slug):
-    """A team's next scheduled game from its ESPN team page (~22KB).
+class _TeamPage:
+    """Picks the next game and the record out of a team page (~25KB) as it streams past, keeping only a
+    few small pieces: the page is too big to hold at once once the board's memory has fragmented."""
+    TAIL = 40
+    REC_MAX = 1600
 
-    Returns {"date", "name", "time_valid"} or None. The page is small enough
-    to hold as raw bytes, so the fields are located with find() rather than
-    parsing the whole JSON.
-    """
+    def __init__(self):
+        self.tail = b""
+        self.on = False     # the "nextEvent" part has started
+        self.date = None
+        self.name = None
+        self.valid = None
+        self.rec = None     # bytes after the record marker, until REC_MAX
+        self.rec_done = False
+
+    def add(self, chunk):
+        win = self.tail + chunk
+        self.tail = win[-self.TAIL:]
+        if self.rec is None:
+            i = win.find(b'"record":{"items":[')
+            if i >= 0:
+                self.rec = win[i:i + self.REC_MAX]
+        elif len(self.rec) < self.REC_MAX:
+            self.rec += chunk[:self.REC_MAX - len(self.rec)]
+        if not self.on:
+            i = win.find(b'"nextEvent":[')
+            if i < 0:
+                return
+            self.on = True
+            win = win[i:]
+        if self.date is None:
+            i = win.find(b'"date":"')
+            if i >= 0 and win.find(b'"', i + 8) > i + 8 + 10:  # all of it has arrived
+                self.date = _str(win, b'"date":"')[0]
+        if self.valid is None:
+            i = win.find(b'"timeValid":')
+            if i >= 0 and len(win) > i + 17:
+                self.valid = win[i + 12:i + 17] != b"false"
+        if self.name is None:
+            pos = 0
+            while True:
+                a = _event_anchor(win, pos)
+                if a < 0:
+                    break
+                self.name = _str(win, ANCHOR, a - 1)[0]
+                break
+
+    def done(self):
+        return (self.name and self.date and self.valid is not None and self.rec is not None
+                and len(self.rec) >= self.REC_MAX)
+
+    def result(self):
+        if not self.name or not self.date:
+            return None
+        record, streak = None, 0
+        r = self.rec
+        if r:
+            k = r.find(b'"name":"streak","value":')
+            if k >= 0:
+                try:
+                    streak = int(float(r[k + 24:k + 34].split(b"}")[0]))
+                except ValueError:
+                    pass
+            k = r.find(b'"summary":"')
+            if k >= 0:
+                record = str(r[k + 11:k + 20].split(b'"')[0], "utf-8")
+        return {"date": self.date[:16] + "Z", "name": self.name.replace(" vs. ", " VS "), "time_valid": self.valid is not False,
+                "record": record, "streak": streak}
+
+
+def next_event(league_path, slug):
+    """A team's next scheduled game from its ESPN team page.
+
+    Returns {"date", "name", "time_valid", "record", "streak"} or None. The page streams past in small
+    pieces (see _TeamPage), so this needs only a few KB however fragmented the memory is."""
     gc.collect()
     s, body = _open(HOST, TEAM_PATH % (league_path, slug))
-    parts = [body]
+    page = _TeamPage()
     n = len(body)
     try:
-        while n < 60000:
-            d = s.read(2048)
+        page.add(body)
+        while n < 60000 and not page.done():
+            d = s.read(1024)
             if not d:
                 break
-            parts.append(d)
             n += len(d)
+            page.add(d)
     finally:
         s.close()
-    buf = b"".join(parts)
-    parts = None
-    i = buf.find(b'"nextEvent":[')
-    if i < 0:
-        return None
-    sub = buf[i:]
-    record, streak = None, 0
-    r = buf.find(b'"record":{"items":[')
-    if r >= 0:
-        k = buf.find(b'"name":"streak","value":', r)
-        if k >= 0:
-            try:
-                streak = int(float(buf[k + 24:k + 34].split(b"}")[0]))
-            except ValueError:
-                pass
-        k = buf.find(b'"summary":"', r)
-        if k >= 0:
-            record = str(buf[k + 11:k + 20].split(b'"')[0], "utf-8")
-    buf = None
-    a = _event_anchor(sub, 0)
-    if a < 0:
-        return None
-    name, _ = _str(sub, ANCHOR, a - 1)
-    date, _ = _str(sub, b'"date":"')
-    if not name or not date:
-        return None
     gc.collect()
-    return {"date": date[:16] + "Z", "name": name, "time_valid": b'"timeValid":false' not in sub,
-            "record": record, "streak": streak}
+    return page.result()

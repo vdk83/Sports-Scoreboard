@@ -36,6 +36,10 @@ KEEP = {("baseball", "LAD"): (0, 110, 255), ("football", "SEA"): (105, 220, 40),
         ("soccer", "SEA"): (105, 220, 40)}  # the colours the board already used for the original three teams
 
 
+# Soccer clubs have long official names ("Seattle Sounders FC"); the panel fits about 15 letters, so use the short one.
+NICKS = {("soccer", "SEA"): "SOUNDERS", ("soccer", "RBNY"): "RED BULLS", ("soccer", "LAFC"): "LAFC",
+         ("soccer", "NE"): "REVOLUTION", ("soccer", "SKC"): "SPORTING KC"}
+
 FEED_ABBR = {("hockey", "UTAH"): "UTA"}  # where the scoreboard feed spells a team differently from the teams list
 
 
@@ -56,6 +60,8 @@ def main():
         rows = []
         for entry in get(ESPN % path)["sports"][0]["leagues"][0]["teams"]:
             t = entry["team"]
+            if t["abbreviation"].upper().startswith("TBD"):  # placeholder teams ESPN sometimes lists
+                continue
             abbr, mlb_id = t["abbreviation"], 0
             abbr = FEED_ABBR.get((sport, abbr), abbr)
             if sport == "baseball":
@@ -63,7 +69,9 @@ def main():
                 if m is None:
                     raise SystemExit("no MLB match for " + t["displayName"])
                 abbr, mlb_id = m["abbreviation"], m["id"]  # MLB's own abbreviation is what its games use
-            rows.append((t["displayName"], t["name"].upper(), abbr, t["abbreviation"].lower(),
+            nick = NICKS.get((sport, abbr)) or (t["shortDisplayName"] if sport == "soccer" else t["name"]).upper()
+            page = t["id"] if sport == "soccer" else t["abbreviation"].lower()  # ESPN's soccer team pages are found by id
+            rows.append((t["displayName"], nick.upper(), abbr, page,
                          KEEP.get((sport, abbr)) or pick_color(t), mlb_id))
         rows.sort()
         out[sport] = rows

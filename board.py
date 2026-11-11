@@ -3,6 +3,7 @@
 # Everything draws through a PicoGraphics-style object `g` (create_pen,
 # set_pen, rectangle), so it runs on the Interstate 75 and can also be
 # previewed on a computer with a fake `g`.
+import logos
 
 WHITE = (230, 230, 230)
 GREY = (110, 110, 110)
@@ -149,35 +150,71 @@ class Board:
         return (v["color"] if ours == "away" else WHITE,
                 v["color"] if ours == "home" else WHITE)
 
+    def _logo(self, x, y, v, k, label, score, right):
+        """Draw team k's logo (10x10) at x, y when there is one and the 2x label and score still fit before
+        `right`. Returns the x where the label should start (after the logo), or None when no logo was drawn."""
+        abbrs = v.get("abbrs")
+        if not abbrs:
+            return None
+        sc = text_width(str(score), 2) if score is not None else 0
+        if 12 + text_width(label, 2) + 2 + sc > right:
+            return None
+        px = logos.get(v["sport"], abbrs[k])
+        if px is None:
+            return None
+        n = logos.SIZE
+        for i in range(n * n):
+            if px[i]:
+                self.rect(x + i % n, y + i // n, 1, 1, logos.color(px[i]))
+        return x + 12
+
     def _pips(self, quarter, x, y):
         """Four small squares for the quarters of a football game; the ones played so far are lit."""
         for i in range(4):
             self.rect(x + i * 4, y, 3, 3, GOLD if i < quarter else ABS_OFF)
 
+    def _name_line(self, y, prefix, name, color=WHITE):
+        """A short line of text: a grey letter, then a player's name cut to fit."""
+        self.text(1, y, prefix, GREY)
+        self.text(1 + text_width(prefix + " "), y, name[:9], color)
+
     def _draw_full(self, v, y0):
         hk = v.get("hockey")
-        self.text(1, y0 + 1, v["status"], v["status_color"])
+        qb = v.get("qb")  # with a quarterback line at the bottom the rows move up to make room
+        top = y0 if qb else y0 + 1
+        self.text(1, top, v["status"], v["status_color"])
         if hk and hk["pp_on"]:
-            self.text(self.w - 1 - text_width("PP"), y0 + 1, "PP", RED)
+            self.text(self.w - 1 - text_width("PP"), top, "PP", RED)
         elif v.get("quarter"):
-            self._pips(v["quarter"], self.w - 16, y0 + 2)
+            self._pips(v["quarter"], self.w - 16, top + 1)
         elif v.get("tag"):
-            self.text(self.w - 1 - text_width(v["tag"]), y0 + 1, v["tag"], GOLD)
+            self.text(self.w - 1 - text_width(v["tag"]), top, v["tag"], GOLD)
         ca, ch = self._side_colors(v)
         for k, (side, label, score, col) in enumerate(
                 (("away", v["away"], v["away_score"], ca), ("home", v["home"], v["home_score"], ch))):
-            y = y0 + 8 + k * 12
-            self.rect(0, y, 1, 10, col if col != WHITE else GREY)
-            self.text(4, y, label, col, 2)
+            y = y0 + (6 + k * 11 if qb else 8 + k * 12)
+            lx = None if hk else self._logo(0, y, v, k, label, score, self.w)
+            if lx is None:
+                self.rect(0, y, 1, 10, col if col != WHITE else GREY)
+            self.text(lx or 4, y, label, col, 2)
             if hk:
-                i = k
                 pp = hk["pp"] == side
                 if pp:
                     self.rect(1, y, 1, 10, RED)
-                self.text(31, y + 3, "%d SOG" % hk["sog"][i], RED if pp else GREY)
+                goalie = (hk.get("goalies") or {}).get(side)
+                if goalie:  # shots on goal, with the goalie's name under it
+                    self.text(29, y, "%d SOG" % hk["sog"][k], RED if pp else GREY)
+                    self.text(29, y + 6, goalie[:6], WHITE)
+                else:
+                    self.text(31, y + 3, "%d SOG" % hk["sog"][k], RED if pp else GREY)
             if score is not None:
                 s = str(score)
                 self.text(self.w - 1 - text_width(s, 2), y, s, WHITE, 2)
+        if qb:  # the game's passing leader and his yards, in his team's colour when it is ours
+            name, yds, side = qb
+            tail = "%dY" % yds
+            name = name[:max(1, (self.w - 2 - text_width(tail) - 4 + 1) // 4)]
+            self.segments(1, y0 + 27, [(name, (ca, ch)[side == "home"]), (tail, GREY)])
 
     def _plus(self, cx, cy, c):
         """A base: 3x3 plus shape, which reads as a diamond at this size."""
@@ -192,15 +229,42 @@ class Board:
             self.rect(x if vertical else x + off, y + off if vertical else y,
                       size, size, c if on else ABS_OFF)
 
+    def _draw_ball_names(self, v, y0):
+        """One live baseball game with the pitcher on the top line and the batter on the bottom line."""
+        live = v["live"]
+        self._name_line(y0, "P", live["pitcher"])
+        ca, ch = self._side_colors(v)
+        for k, (side, label, col) in enumerate((("away", v["away"], ca), ("home", v["home"], ch))):
+            y = y0 + 6 + k * 11
+            s = str(v[side + "_score"])
+            lx = None if live["abs"] else self._logo(0, y, v, k, label, v[side + "_score"], 44)
+            self.text(lx or 5, y, label, col, 2)
+            self.text(44 - text_width(s, 2), y, s, WHITE, 2)
+            if live["abs"]:
+                self._abs_squares(0, y + 1, live["abs"][side], v["color"] if v["ours"] == side else WHITE,
+                                  3, 2, True)
+        b = live["bases"]
+        for on, x, y in ((b[1], 56, 7), (b[2], 52, 11), (b[0], 60, 11)):
+            self._plus(x, y0 + y, YELLOW if on else BASE_OFF)
+        for i in range(3):
+            self.rect(52 + i * 4, y0 + 15, 3, 1, OUT_ON if i < live["outs"] else OUT_OFF)
+        st = v["status"]
+        self.text(self.w - 1 - text_width(st), y0 + 18, st, v["status_color"])
+        self.text(self.w - 1 - text_width(live["count"]), y0 + 24, live["count"], GREY)
+        self._name_line(y0 + 27, "B", live["batter"])
+
     def _draw_ball_full(self, v, y0):
         live = v["live"]
+        if live.get("pitcher") or live.get("batter"):
+            return self._draw_ball_names(v, y0)
         self.text(5, y0 + 1, v["status"], v["status_color"])
         self.text(5 + text_width(v["status"]) + 4, y0 + 1, live["count"], GREY)
         ca, ch = self._side_colors(v)
         for k, (side, label, col) in enumerate((("away", v["away"], ca), ("home", v["home"], ch))):
             y = y0 + 8 + k * 12
             s = str(v[side + "_score"])
-            self.text(5, y, label, col, 2)
+            lx = None if live["abs"] else self._logo(0, y, v, k, label, v[side + "_score"], 44)
+            self.text(lx or 5, y, label, col, 2)
             self.text(44 - text_width(s, 2), y, s, WHITE, 2)
             if live["abs"]:
                 self._abs_squares(0, y + 1, live["abs"][side], v["color"] if v["ours"] == side else WHITE,
@@ -282,6 +346,9 @@ class Board:
         step = 7
         top = y0 + (y1 - y0 - step * len(lines) + 2) // 2
         for i, (s, c) in enumerate(lines):
+            if not isinstance(s, list):
+                while len(s) > 1 and text_width(s) > self.w - 2:  # never run off the panel: cut what doesn't fit
+                    s = s[:-1]
             if isinstance(s, list):  # several (text, colour) parts on one line
                 w = sum(text_width(t) for t, _ in s) + 4 * (len(s) - 1)
                 self.segments((self.w - w) // 2, top + i * step, s)

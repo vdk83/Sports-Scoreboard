@@ -1,4 +1,4 @@
-# Extra cameos (CatMouse, Dino, DogFetch, Pizza, Speaker). Loaded only while one plays (see critters.EXTRAS).
+# Extra cameos (CatMouse, Dino, DogFetch, Pizza, Speaker, StatueOfLiberty, EmpireState). Loaded only while one plays (see critters.EXTRAS).
 # (see critters.EXTRAS), so keep this file's imports small.
 import math
 
@@ -120,3 +120,77 @@ class Speaker(Cameo):
             y = 26 - t // 7
             if y > 0:
                 sprite(b, x, y, self.NOTE, {"X": [(255, 120, 200), (120, 200, 255), (255, 230, 90), (150, 255, 150)][n]})
+
+
+def burst(b, cx, cy, t, c):
+    """One firework: dots fly out from (cx, cy) for t = 0..15 frames, fading as they go."""
+    if t < 0 or t > 15:
+        return
+    r = 1 + t * 5 // 8
+    col = dim(c, 1.0 - t / 18)
+    for k in range(8):
+        a = k * math.pi / 4
+        x, y = cx + int(math.cos(a) * r), cy + int(math.sin(a) * r * 0.8)
+        if 0 <= x < 64 and 0 <= y < 28:
+            b.rect(x, y, 1, 1, col)
+
+
+class StatueOfLiberty(Cameo):
+    total = 230
+    LADY = ("..G.G.G....", "...GGGG....", "...GGGG....", "....GG.....", "..GGGGGG...", ".GGGGGGGG..",
+            ".GGDGGGDG..", ".GGDGGGDG..", "..GDGGGDG..", "..GDGGGDG..", "..GGDGDGG..", "..GDGGGDG..",
+            ".GGDGGGDGG.", ".GGDGGGDGG.", "GGDDGGGDDGG", "GGGGGGGGGGG")
+    PAL = {"G": (70, 175, 145), "D": (35, 105, 90)}
+    FIRE = ((255, 90, 90), (255, 230, 90), (110, 170, 255), (255, 255, 255))
+
+    def render(self, b, f):
+        x, y = 40, 5
+        for yy in range(28, 32):
+            b.rect(0, yy, 64, 1, (25, 70, 140) if (yy + f // 12) % 2 else (35, 90, 165))
+        b.rect(x - 1, 21, 13, 7, (150, 150, 162))
+        b.rect(x - 1, 21, 13, 1, (195, 195, 205))
+        b.rect(x + 1, 24, 9, 1, (115, 115, 125))
+        b.rect(x - 2, 27, 15, 1, (115, 115, 125))
+        sprite(b, x, y, self.LADY, self.PAL)
+        b.rect(x + 8, y - 3, 2, 6, self.PAL["G"])      # raised arm
+        b.rect(x + 7, y - 4, 4, 1, (200, 170, 60))     # torch
+        flame = (255, 230, 90) if (f // 3) % 2 else (255, 150, 30)
+        b.rect(x + 8, y - 6, 2, 2, flame)
+        if (f // 5) % 3:
+            b.rect(x + 8, y - 7 if y - 7 >= 0 else 0, 2, 1, dim(flame, 0.5))
+        for k, c in enumerate(self.FIRE):
+            burst(b, 10 + (k * 7) % 22, 6 + (k * 5) % 9, (f - 30 - k * 45) % 120, c)
+        if f > 110:
+            b.text(3, 17, "NEW", AMBER)
+        if f > 150:
+            b.text(3, 24, "YORK", AMBER)
+
+
+class EmpireState(Cameo):
+    day = False
+    total = 230
+    SHOW = ((255, 60, 60), (240, 240, 240), (70, 130, 255), (70, 220, 100))
+    TIERS = ((22, 10, 16), (16, 6, 12), (11, 5, 8), (8, 3, 6), (5, 3, 4), (3, 2, 2))   # y, height, width
+
+    def render(self, b, f):
+        stars(b, f, 10)
+        for bx, bw, top in ((0, 7, 17), (7, 6, 21), (13, 5, 24), (46, 5, 23), (51, 6, 19), (57, 7, 15)):
+            b.rect(bx, top, bw, 32 - top, (22, 22, 38))
+            for wy in range(top + 2, 30, 3):
+                for wx in range(bx + 1, bx + bw - 1, 2):
+                    if (wx * 5 + wy * 3 + f // 40) % 4 == 0:
+                        b.rect(wx, wy, 1, 1, (200, 170, 70))
+        glow = self.SHOW[(f // 45) % 4]
+        stone = (150, 150, 165)
+        for i, (ty, th, tw) in enumerate(self.TIERS):
+            c = stone if i < 2 else glow
+            b.rect(32 - tw // 2, ty, tw, th, c)
+            if i < 2:
+                for wy in range(ty + 1, ty + th - 1, 2):
+                    for wx in range(33 - tw // 2, 31 + tw // 2, 2):
+                        if (wx * 7 + wy * 3 + f // 30) % 3:
+                            b.rect(wx, wy, 1, 1, (255, 220, 110))
+        b.rect(32, 0, 1, 3, (200, 200, 210))
+        if (f // 10) % 2:
+            b.rect(31, 0, 3, 1, RED)
+        b.rect(0, 31, 64, 1, (50, 50, 60))

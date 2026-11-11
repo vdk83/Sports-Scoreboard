@@ -87,9 +87,19 @@ class Importance(unittest.TestCase):
 class Visible(unittest.TestCase):
     now = epoch(2026, 10, 25, 22)
 
-    def test_pre_games_stay_off_the_board(self):
-        out = visible([(SEA_NFL, [game(state="pre")])], self.now, True)
-        self.assertEqual(out, [])
+    def test_pre_games_join_an_hour_before_the_start(self):
+        self.assertEqual(visible([(SEA_NFL, [game(state="pre", date="2026-10-26T01:00Z")])], self.now, True), [])  # 3h away
+        out = visible([(SEA_NFL, [game(state="pre", date="2026-10-25T22:50Z")])], self.now, True)  # 50 min away
+        self.assertEqual(len(out), 1)
+        self.assertEqual(visible([(SEA_NFL, [game(state="pre", date="2026-10-25T22:50Z")])], self.now, False), [])  # no clock
+
+    def test_final_stays_an_hour_after_the_end(self):
+        g = game(state="post", date="2026-10-25T17:00Z")  # a football game: ends about 20:15Z by the usual length
+        self.assertEqual(visible([(SEA_NFL, [g])], self.now, True), [])  # 22:00Z is 1h45 after the guessed end
+        ended = {scores.game_key("football", g): self.now - 1800}  # we saw it end half an hour ago
+        self.assertEqual(len(visible([(SEA_NFL, [g])], self.now, True, (), ended)), 1)
+        ended = {scores.game_key("football", g): self.now - 3700}
+        self.assertEqual(visible([(SEA_NFL, [g])], self.now, True, (), ended), [])
 
     def test_old_final_drops_off(self):
         old = game(state="post", date="2026-10-24T20:00Z")
@@ -97,7 +107,7 @@ class Visible(unittest.TestCase):
         self.assertEqual(len(visible([(SEA_NFL, [old])], self.now, False)), 1)
 
     def test_live_first_and_max_four(self):
-        games = [game(name="G%d" % i, state="post", date="2026-10-25T%02d:00Z" % (10 + i)) for i in range(5)]
+        games = [game(name="G%d" % i, state="post", date="2026-10-25T%02d:00Z" % (18 + i)) for i in range(5)]
         live = game(name="LIVE")
         out = visible([(SEA_NFL, games + [live])], self.now, True)
         self.assertEqual(len(out), 4)
@@ -223,7 +233,7 @@ class QuietAndClose(unittest.TestCase):
 
     def test_live_hockey_and_football_views(self):
         hk = make_view(LEAGUES[2], game(sport="hockey", period=2, clock="12:03", sog=(14, 21), pp="home", pp_on=True), 0)
-        self.assertEqual(hk["hockey"], {"sog": (14, 21), "pp": "home", "pp_on": True})
+        self.assertEqual(hk["hockey"], {"sog": (14, 21), "pp": "home", "pp_on": True, "goalies": {}})
         self.assertEqual(scores.short_status(game(sport="hockey", period=2, clock="12:03", pp_on=True), 0), "P2 PP")
         self.assertNotIn("hockey", make_view(LEAGUES[2], game(sport="hockey", period=2), 0))  # no extras fetched
         fb = make_view(LEAGUES[1], game(sport="football", period=3, clock="5:21"), 0)
@@ -242,6 +252,39 @@ class QuietAndClose(unittest.TestCase):
         self.assertTrue(scores.is_close(mls))
         self.assertEqual(scores.banner(scores.SPORTS[4], mls, "home", 1)[0][:4], "GOAL")
 
+    def test_names_for_the_panel(self):
+        import espn
+        self.assertEqual(espn.last_name("Julio Rodr\u00edguez Jr."), "RODRIGUEZ")
+        self.assertEqual(espn.last_name("Shohei Ohtani"), "OHTANI")
+        self.assertEqual(espn.last_name("T. Lawrence"), "LAWRENCE")
+        self.assertEqual(espn.last_name("Ronald Acu\\u00f1a Jr."), "ACUNA")  # escaped in the feed
+
+    def test_player_lines_reach_the_views(self):
+        bb = dict(sport="baseball", state="in", detail="Top 7th", bases=(True, False, False), outs=1, count="1-2",
+                  abs=None, pitcher="KERSHAW", batter="OHTANI", period=7, clock="", away="SF", home="LAD",
+                  away_score=1, home_score=2, date="2026-10-25T20:00Z", name="SF @ LAD")
+        self.assertEqual((make_view(LAD, bb, 0)["live"]["pitcher"], make_view(LAD, bb, 0)["live"]["batter"]),
+                         ("KERSHAW", "OHTANI"))
+        fb = make_view(LEAGUES[1], game(sport="football", period=3, qb=("LAWRENCE", 242, "away")), 0)
+        self.assertEqual(fb["qb"], ("LAWRENCE", 242, "away"))
+        self.assertNotIn("qb", make_view(LEAGUES[1], game(sport="football", period=3), 0))
+
+    def test_goalie_scan_any_chunk_size(self):
+        import nhl
+        def goalie(last):
+            return (b'{"athlete":{"id":"1","lastName":"' + last + b'","displayName":"x","position":{"abbreviation":"G"}},'
+                    b'"stats":["1"]}')
+        stream = (b'{"boxscore":{"teams":[{"team":{"abbreviation":"MTL"},"statistics":[{"name":"goals","abbreviation":"G"}]}],'
+                  b'"players":[{"team":{"id":"10","abbreviation":"MTL"},"statistics":[{"name":"forwards","athletes":[]},'
+                  b'{"name":"goalies","athletes":[' + goalie(b"Fowler") + b']}]},'
+                  b'{"team":{"id":"21","abbreviation":"TOR"},"statistics":[{"name":"goalies","athletes":['
+                  + goalie(b"Woll") + b',' + goalie(b"Bobrovsky") + b']}]}]}' + b" " * 3000)
+        for size in (50, 333, 1024, 5000):
+            scan = nhl.GoalieScan()
+            for i in range(0, len(stream), size):
+                scan.add(stream[i:i + size])
+            self.assertEqual(scan.names, {"MTL": "FOWLER", "TOR": "BOBROVSKY"}, size)  # the newest listed goalie wins
+
     def test_nhl_summary_and_situation(self):
         import nhl
         head = (b'{"boxscore":{"teams":[{"team":{"id":"10","abbreviation":"MTL","name":"x"},"statistics":['
@@ -257,3 +300,71 @@ class QuietAndClose(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestNews(unittest.TestCase):
+    def test_headlines_any_chunk_size(self):
+        import news
+        j = (b'{"articles":[{"headline":"Kraken\\u2019s Tolvanen scores twice, beats \\"Avs\\"","x":1},'
+             b'{"headline":"Short","a":1},{"headline":"Second long headline here today","k":2}]}')
+        for n in (1, 7, 10000):
+            s = news.Scan()
+            for i in range(0, len(j), n):
+                s.add(j[i:i + n])
+            self.assertEqual(s.found, ["KRAKEN'S TOLVANEN SCORES TWICE, BEATS AVS", "SECOND LONG HEADLINE HERE TODAY"])
+
+    def test_clean_keeps_font_characters(self):
+        import news
+        self.assertEqual(news.clean("Café — win #1 @ home"), "CAF - WIN 1 HOME")
+
+
+class TestTickerFilter(unittest.TestCase):
+    def test_mine_only(self):
+        now = time.time()
+        mine, other = game(), game()
+        other["away"], other["home"] = "ZZZ", "YYY"
+        allp = " ".join(p[0] for p in marquee_parts([(SEA_NFL, [mine, other])], now, True))
+        only = " ".join(p[0] for p in marquee_parts([(SEA_NFL, [mine, other])], now, True, True))
+        self.assertIn("ZZZ", allp)
+        self.assertNotIn("ZZZ", only)
+
+
+class Logos(unittest.TestCase):
+    def test_every_team_has_a_logo(self):
+        import logos
+        import teams
+        for sport, rows in teams.TEAMS.items():
+            for row in rows:
+                px = logos.get(sport, row[2])
+                self.assertIsNotNone(px, (sport, row[0]))
+                self.assertEqual(len(px), logos.SIZE * logos.SIZE)
+                self.assertTrue(any(px), (sport, row[0]))  # not blank
+
+    def test_unknown_team(self):
+        import logos
+        self.assertIsNone(logos.get("baseball", "ZZZ"))
+        self.assertIsNone(logos.get("curling", "AAA"))
+
+
+class EspnOrder(unittest.TestCase):
+    """ESPN's soccer feed lists a team's score and records ('abbreviation': 'Total') before the team itself."""
+
+    def test_records_before_team(self):
+        import espn
+        comp = (b'{"homeAway":"%s","winner":true,"score":"%s","records":[{"name":"All Splits","type":"total",'
+                b'"abbreviation":"Total"}],"team":{"id":"%s","abbreviation":"%s"}}')
+        rec = (b'{"shortName":"LAFC @ SEA","competitions":[{"competitors":[' + comp % (b"home", b"2", b"9", b"SEA") + b","
+               + comp % (b"away", b"1", b"8", b"LAFC") + b'],"status":{"displayClock":"90","period":2,'
+               b'"type":{"state":"post","shortDetail":"FT"}}}]}')
+        g = espn.parse_event(rec, "2026-11-11T03:00Z", "soccer")
+        self.assertEqual((g["home"], g["home_score"], g["away"], g["away_score"]), ("SEA", 2, "LAFC", 1))
+        self.assertEqual(g["state"], "post")
+
+    def test_team_before_score(self):
+        import espn
+        comp = b'{"homeAway":"%s","team":{"id":"%s","abbreviation":"%s"},"score":"%s"}'
+        rec = (b'{"shortName":"KC @ SEA","competitors":[' + comp % (b"home", b"1", b"SEA", b"24") + b","
+               + comp % (b"away", b"2", b"KC", b"17") + b'],"status":{"displayClock":"0:00","period":4,'
+               b'"type":{"state":"post","shortDetail":"Final"}}}')
+        g = espn.parse_event(rec, "2026-11-11T03:00Z", "football")
+        self.assertEqual((g["home"], g["home_score"], g["away"], g["away_score"]), ("SEA", 24, "KC", 17))

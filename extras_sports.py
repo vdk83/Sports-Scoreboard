@@ -1,4 +1,4 @@
-# Extra cameos (HomeRun, HockeyGoal, FieldGoal, Hoops, Trophy). Loaded only while one plays (see critters.EXTRAS).
+# Extra cameos (HockeyGoal, FieldGoal, Trophy). Loaded only while one plays (see critters.EXTRAS).
 # (see critters.EXTRAS), so keep this file's imports small.
 import math
 
@@ -24,40 +24,6 @@ def stars(b, f, n=18):
 def caption(b, s, c=AMBER, y=2):
     b.text((b.w - text_width(s)) // 2, y, s, c)
 SKIN = (240, 200, 160)
-
-
-class HomeRun(Cameo):
-    total = 230
-
-    def render(self, b, f):
-        b.rect(0, 27, 64, 5, (30, 120, 45))
-        b.rect(24, 14, 40, 13, (20, 90, 35))
-        b.rect(24, 14, 40, 2, (30, 70, 200))       # outfield wall
-        b.rect(10, 24, 12, 1, (120, 90, 50))         # home plate area
-        # batter
-        b.rect(8, 11, 5, 2, (30, 70, 200))
-        b.rect(9, 13, 3, 3, SKIN)
-        b.rect(8, 16, 5, 6, WHITE)
-        b.rect(8, 22, 2, 6, (200, 200, 210))
-        b.rect(11, 22, 2, 6, (200, 200, 210))
-        b.rect(8, 28, 2, 1, DARK)
-        b.rect(11, 28, 2, 1, DARK)
-        s = f - 50                                    # the swing starts at frame 50
-        theta = -1.35 if s < 0 else -1.35 + min(s, 8) * 0.19
-        for i in range(2, 10):
-            b.rect(int(13 + math.cos(theta) * i), int(17 + math.sin(theta) * i), 1, 1, BROWN)
-        if s < 0:
-            t = max(0, f)
-            b.rect(60 - t * 38 // 50, 20 + t // 12, 3, 3, WHITE)      # the pitch
-        elif s >= 3:
-            t = s - 3
-            bx = 21 + t * 2
-            by = 19 - t * 3 // 2 + t * t // 70
-            if bx < 66 and by > -3:
-                b.rect(bx, by, 3, 3, WHITE)
-                b.rect(bx - 3, by + 1, 2, 1, dim(WHITE, 0.5))
-        if f > 105:
-            caption(b, "HOME RUN!", YELLOW if (f // 4) % 2 else WHITE, 3)
 
 
 class HockeyGoal(Cameo):
@@ -132,34 +98,6 @@ class FieldGoal(Cameo):
         if f > 130:
             b.text(16, 20, "IT'S GOOD!", YELLOW if (f // 4) % 2 else WHITE)
             b.rect(44 + (f // 6) % 20, 2, 1, 1, WHITE)
-
-
-class Hoops(Cameo):
-    total = 220
-
-    def render(self, b, f):
-        b.rect(0, 29, 64, 3, (150, 100, 50))
-        b.rect(54, 3, 3, 13, WHITE)           # backboard
-        b.rect(55, 7, 1, 4, RED)
-        b.rect(44, 15, 10, 2, ORANGE)           # rim
-        for k in range(4):                      # net
-            b.rect(45 + k * 2 + (f // 8 % 2 if 110 < f < 120 else 0), 17, 1, 5 - k % 2, dim(WHITE, 0.8))
-        t = f - 10
-        if t < 0:
-            bx, by = 6, 22 - hop(f, 10, 5)
-        elif t < 85:
-            u = t / 85.0
-            bx = 6 + int(u * 40)
-            by = 24 - int(math.sin(u * 3.14159) * 20) + int(u * u * 8)
-        elif t < 105:
-            bx, by = 46, 18 + (t - 85)
-        else:
-            bx, by = 46 + (t - 105) // 3, 26 - hop(t - 105, 40, 10)
-        by = min(by, 26)
-        blob(b, bx + 3, by, (3, 5, 7, 7, 7, 5, 3)[1:6], ORANGE)
-        b.rect(bx, by + 2, 7, 1, BROWN)
-        if t > 85:
-            caption(b, "SWISH!", WHITE if (f // 4) % 2 else YELLOW, 3)
 
 
 class Trophy(Cameo):

@@ -364,10 +364,10 @@ class AppTest(unittest.TestCase):
             settings.add_reminder("daily thing", "2026-11-01", "", 1)
             settings.add_reminder("weekly", "2026-11-01", "", 2)  # a Sunday
             sat = (2026, 11, 7, 18, 30, 0, 5, 0, 0)
-            self.assertEqual(settings.active_reminders(sat), ["TAKE OUT TRASH", "DAILY THING"])
-            self.assertEqual(settings.active_reminders((2026, 11, 7, 22, 0, 0, 5, 0, 0)), ["DAILY THING"])
+            self.assertEqual([t for t, _ in settings.active_reminders(sat)], ["TAKE OUT TRASH", "DAILY THING"])
+            self.assertEqual([t for t, _ in settings.active_reminders((2026, 11, 7, 22, 0, 0, 5, 0, 0))], ["DAILY THING"])
             self.assertEqual(len(settings.reminders), 3)
-            self.assertEqual(settings.active_reminders((2026, 11, 8, 9, 0, 0, 6, 0, 0)), ["DAILY THING", "WEEKLY"])
+            self.assertEqual([t for t, _ in settings.active_reminders((2026, 11, 8, 9, 0, 0, 6, 0, 0))], ["DAILY THING", "WEEKLY"])
             self.assertEqual(len(settings.reminders), 2)  # the one-off is over: dropped
             real = app.local_now
             app.local_now = lambda t: sat
@@ -387,6 +387,155 @@ class AppTest(unittest.TestCase):
             settings.REMINDERS = old
             del settings.reminders[:]
 
+    def test_countdown_standings_and_format(self):
+        import tempfile
+        old = settings.REMINDERS
+        settings.REMINDERS = os.path.join(tempfile.mkdtemp(), "r.json")
+        del settings.reminders[:]
+        try:
+            settings.add_reminder("opening day", "2026-11-12", "", 3)
+            self.assertEqual(settings.active_reminders((2026, 11, 10, 9, 0, 0, 1, 0, 0)), [("OPENING DAY", 2)])
+            self.assertEqual(settings.active_reminders((2026, 11, 12, 9, 0, 0, 3, 0, 0)), [("OPENING DAY", 0)])
+            settings.add_reminder("far", "2027-06-01", "", 3)
+            self.assertEqual(len(settings.active_reminders((2026, 11, 12, 9, 0, 0, 3, 0, 0))), 1)  # too far ahead
+            self.assertEqual(len(settings.active_reminders((2026, 11, 13, 9, 0, 0, 4, 0, 0))), 0)   # the first one is over
+            self.assertEqual(settings._days(2026, 3, 1) - settings._days(2026, 2, 1), 28)
+            self.sb.standings[("baseball", "LAD")] = (203, [("LAD", 90, 72), ("SD", 85, 77), ("SF", 80, 82), ("AZ", 70, 92), ("COL", 50, 112)])
+            pages = self.sb.extra_slides((2026, 11, 10, 9, 0, 0, 1, 0, 0))
+            self.assertEqual(len(pages), 2)  # rows 1-3, then rows 4-5 under the division name (the far countdown is not shown yet)
+        finally:
+            settings.REMINDERS = old
+            del settings.reminders[:]
+
+    def test_24_hour_and_speed(self):
+        self.sb.web("GET", "/set", {"h24": "1", "speed": "3"})
+        self.assertTrue(app.scores.H24)
+        self.assertEqual(app.scores.hhmm_text(18, 5), "18:05")
+        self.sb.web("GET", "/set", {"h24": "0"})
+        self.assertFalse(app.scores.H24)
+        self.assertEqual(app.scores.hhmm_text(18, 5), "6:05P")
+        for slide in range(len(app.LEAGUES) + 4):
+            self.sb.slide_drawn = None
+            self.sb.slide = slide
+            self.sb.idle_screen()
+        settings.cfg.update(settings.DEFAULTS)
+
+    def test_slide_wipe(self):
+        self.sb.mode = 0
+        self.sb.slide = 0
+        self.sb.idle_screen()
+        self.assertEqual(self.sb.wipe, 0)
+        self.sb.slide = 1
+        for left in range(app.WIPE_FRAMES - 1, -1, -1):
+            self.sb.idle_screen()
+            self.assertEqual(self.sb.wipe, left)
+        self.sb.idle_screen()
+        self.assertEqual(self.sb.wipe, 0)
+        self.assertIsNotNone(self.sb.slide_drawn)  # settled: drawn once, no more redraws
+
+    def test_restart_when_memory_fragmented(self):
+        resets = []
+        real = app.machine.reset
+        app.machine.reset = lambda: resets.append(1)
+        try:
+            self.sb.boot_epoch = time.time() - 3600
+            self.sb.views = []
+            self.sb.anims = []
+            self.sb.cameo = None
+            self.sb.mem_errors = app.MEM_ERRORS_RESTART - 1
+            self.sb.watch(time.ticks_ms())
+            self.assertEqual(resets, [])
+            self.sb.mem_errors = app.MEM_ERRORS_RESTART
+            self.sb.views = [object()]  # a game is on: not now
+            self.sb.watch(time.ticks_ms())
+            self.assertEqual(resets, [])
+            self.sb.views = []
+            self.sb.watch(time.ticks_ms())
+            self.assertEqual(len(resets), 1)
+        finally:
+            app.machine.reset = real
+
+    def test_team_page_stream(self):
+        import espn
+        page = (b'{"team":{"record":{"items":[{"summary":"9-6","stats":[{"name":"streak","value":-1.0}]}]},'
+                b'"nextEvent":[{"competitions":[{"date":"2026-11-12T17:00Z","media":{"shortName":"TV"}}],'
+                b'"date":"2026-11-12T17:00Z","name":"Carolina at Seattle","shortName":"CAR vs. SEA","timeValid":true}]}}')
+        for size in (7, 50, 1024):  # however the network cuts it up
+            p = espn._TeamPage()
+            for i in range(0, len(page), size):
+                p.add(page[i:i + size])
+            self.assertEqual(p.result(), {"date": "2026-11-12T17:00Z", "name": "CAR VS SEA", "time_valid": True,
+                                          "record": "9-6", "streak": -1}, size)
+
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestImprovements(unittest.TestCase):
+    """Spoiler delay, timer and stopwatch, ticker filter, magic number and wild card slides."""
+
+    def setUp(self):
+        self.sb = app.Scoreboard.__new__(app.Scoreboard)
+        self.sb.__init__()
+
+    def test_clock_text(self):
+        self.assertEqual(app.clock_text(65), "1:05")
+        self.assertEqual(app.clock_text(3725), "1:02:05")
+
+    def test_timer_counts_down_then_rings(self):
+        self.sb.set_timer({"timer": "90"})
+        lines = self.sb.timer_lines()
+        self.assertEqual(lines[0][0], "TIMER")
+        self.assertIn(lines[1][0], ("1:30", "1:29"))
+        self.sb.timer_end = app.time.ticks_add(app.time.ticks_ms(), -1000)
+        self.assertEqual(self.sb.timer_lines()[0][0], "TIME'S UP!")
+        self.sb.timer_over = app.time.ticks_add(app.time.ticks_ms(), -61000)
+        self.assertIsNone(self.sb.timer_lines())
+        self.sb.set_timer({"timer": "30"})
+        self.sb.set_timer({"timer": "0"})
+        self.assertIsNone(self.sb.timer_lines())
+
+    def test_stopwatch_pause_and_clear(self):
+        self.sb.set_timer({"stopwatch": "1"})
+        self.assertEqual(self.sb.timer_lines()[0][0], "STOPWATCH")
+        self.sb.stopwatch = [app.time.ticks_add(app.time.ticks_ms(), -5000), 0]
+        self.sb.set_timer({"stopwatch": "0"})
+        lines = self.sb.timer_lines()
+        self.assertEqual(lines[0][0], "PAUSED")
+        self.assertEqual(lines[1][0], "0:05")
+        self.sb.set_timer({"stopwatch": "clear"})
+        self.assertIsNone(self.sb.timer_lines())
+
+    def test_spoiler_delay_holds_scores_back(self):
+        old = app.settings.cfg["delay"]
+        try:
+            app.settings.cfg["delay"] = 30
+            self.sb.data[0] = []
+            self.sb.inbox.append(("poll", 0, True, ["new"]))
+            self.sb.apply = lambda *a: self.sb.applied.append(a)
+            self.sb.applied = []
+            self.sb.drain()
+            self.assertEqual(self.sb.applied, [])        # held
+            self.sb.held[("poll", 0)][0] = app.time.ticks_add(app.time.ticks_ms(), -1)
+            self.sb.drain()
+            self.assertEqual(self.sb.applied, [("poll", 0, True, ["new"])])
+            app.settings.cfg["delay"] = 30               # no data yet for a sport: shown at once
+            self.sb.inbox.append(("poll", 2, True, ["first"]))
+            self.sb.drain()
+            self.assertEqual(self.sb.applied[-1], ("poll", 2, True, ["first"]))
+        finally:
+            app.settings.cfg["delay"] = old
+
+    def test_magic_number_and_wild_card_slides(self):
+        old = list(app.LEAGUES)
+        try:
+            lad = [l for l in app.LEAGUES if l["abbr"] == "LAD"][0]
+            self.sb.standings[("baseball", "LAD")] = (203, [("LAD", 90, 72), ("SD", 85, 77)], {"LAD": ("7", "", "-")})
+            texts = [[t if isinstance(t, str) else "" for t, _ in page] for page in self.sb.extra_slides((2026, 9, 1, 9, 0, 0, 1, 0, 0))]
+            self.assertIn(["LAD", "MAGIC NUMBER", "7"], texts)
+            self.sb.standings[("baseball", "LAD")] = (203, [("SD", 90, 72), ("LAD", 85, 77)], {"LAD": ("", "2", "+1.5")})
+            texts = [[t for t, _ in page if isinstance(t, str)] for page in self.sb.extra_slides((2026, 9, 1, 9, 0, 0, 1, 0, 0))]
+            self.assertIn(["LAD", "WILD CARD 2", "1.5 AHEAD"], texts)
+        finally:
+            app.LEAGUES[:] = old

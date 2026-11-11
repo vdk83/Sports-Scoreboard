@@ -1,4 +1,4 @@
-# Extra cameos (Scarecrow, Squirrel, Geese, AppleDrop, HarvestMoon). Loaded only while one plays (see critters.EXTRAS).
+# Extra cameos (Scarecrow, Squirrel, AppleDrop, HarvestMoon). Loaded only while one plays (see critters.EXTRAS).
 import math
 
 from board import AMBER, WHITE, dim, text_width
@@ -80,25 +80,6 @@ class Squirrel(Cameo):
                     b.rect(36 + k * 3, 26 - (f // 3 + k) % 3, 2, 2, (80, 60, 35))
         if f > 170:
             caption(b, "SAVED FOR WINTER" if False else "ACORN!", AMBER, 3)
-
-
-class Geese(Cameo):
-    seasons = FALL
-    total = 240
-    UP = ("W.....W", ".W...W.", "..WWW..", "...W...")
-    DOWN = ("...K...", "..WWW..", ".W...W.", "W.....W")
-    PAL = {"W": (225, 220, 205), "K": (60, 55, 55)}
-
-    def render(self, b, f):
-        for k in range(3):
-            b.rect(k * 24 + 2, 28, 14, 1, (255, 170, 90))
-        b.rect(0, 29, 64, 3, (80, 55, 40))
-        x = -50 + f * 140 // 240
-        for i, (dx, dy) in enumerate(((0, 0), (-11, 5), (-11, -5), (-22, 10), (-22, -10))):
-            gx, gy = x + 40 + dx, 11 + dy + int(math.sin(f / 7 + i) * 1)
-            sprite(b, gx, gy, self.UP if (f // 5 + i) % 2 else self.DOWN, self.PAL, scale=2)
-        if f > 130:
-            b.text(2, 3, "HONK!" if (f // 8) % 2 else "HONK HONK", AMBER)
 
 
 class AppleDrop(Cameo):

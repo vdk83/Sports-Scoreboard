@@ -14,6 +14,7 @@ using a Pimoroni Interstate 75 W (RP2350) running Pimoroni MicroPython v0.0.5.
 | `make_qr.py` | Run on the computer: makes a QR code for the settings page (output `settings_qr*` holds the key; gitignored) |
 | `deploy.py` | Run on the computer: sends changed files to the board over WiFi |
 | `espn.py` | Football and hockey: streams ESPN's scoreboard JSON and extracts only our games |
+| `news.py` | League headlines for the idle ticker (ESPN news feed, streamed, a few per followed sport every 30 min; switch off on the settings page) |
 | `nhl.py` | Hockey: shots on goal and power play for live games (ESPN summary and situation) |
 | `mlb.py` | Baseball: MLB Stats API (runners, outs, count, ABS challenges remaining) |
 | `scores.py` | Team config, which games to show, status text, score-change wording |
@@ -32,18 +33,32 @@ Deploy over WiFi: `python3 deploy.py 192.168.1.50` (the address shows on the pan
 it is remembered after that). Only changed files are sent, then the board restarts. The key is in
 `.ota_key` here and `OTA_KEY` in `secrets.py` on the board. If new code cannot start three times in a
 row, the board puts the old files back by itself (kept as `*.py.bak`). First install, or after changing
-`main.py`, still needs USB: `mpremote cp main.py app.py ota.py espn.py mlb.py nhl.py board.py critters.py jokes.py weather.py scores.py settings.py sun.py teams.py page.py demo.py cameo_demo.py extras_*.py :` then `mpremote reset`.
+`main.py`, still needs USB: `mpremote cp main.py app.py ota.py espn.py mlb.py nhl.py news.py board.py critters.py jokes.py weather.py scores.py settings.py sun.py teams.py logos.py logos_*.py page.py demo.py cameo_demo.py extras_*.py :` then `mpremote reset`.
 
 Developing without the board: `python3 preview.py cameos|games|clock` writes pictures to `preview/`, and
 `python3 preview.py cameo Pumpkin` plays one live in a window.
 
-Games appear 14 h before the start and stay 12 h after. One game fills the
-panel, two split it in half, three or four stack in rows. Times are Pacific
-(change `UTC_STANDARD_OFFSET` in `scores.py`).
+A followed team's game takes over the panel 1 h before the start (showing the start time) and stays
+until 1 h after it ends; the rest of the time the idle screen runs. The end is the moment the board saw the game
+finish, or, if it restarted since, the start plus a typical game length (`TYPICAL` in `scores.py`).
+`SHOW_BEFORE` and `SHOW_AFTER` in `scores.py` change the two hours. One game fills the
+panel, two split it in half, three or four stack in rows. Times follow the time zone in the settings.
 
-Live baseball shows the diamond (bases turn yellow when occupied), three out dots,
-and two ABS challenge squares per team (filled = challenge still available) when one
-or two games are on screen; with three or more games it falls back to one line each.
+What each sport shows when it is live:
+
+| Sport | One game | Two games | Three or more |
+|---|---|---|---|
+| Baseball | the pitcher on the top line and the batter on the bottom line, bases, out dots, inning, count, ABS challenge squares | smaller diamond, outs, ABS squares (no names) | one line, with a tiny diamond |
+| Hockey | period and clock, shots on goal and the goalie's name beside each team, red `PP` and a red edge on the team with the power play | shots as `14-21`, `PP` | one line with `PP` |
+| Football | quarter and clock, four quarter squares (lit up to the current quarter), and the game's passing leader with his yards on the bottom line (`LAWRENCE 242Y`) | quarter squares | one line with the clock when it fits |
+| Basketball | quarter (`OT`, `2OT`...) and clock | same | one line |
+| Soccer | the minute (`67'`, `90'+3'`), `HALFTIME` | same | one line |
+
+Shots on goal, the power play and the goalies come from `nhl.py` (extra ESPN requests per live followed game; the goalies are
+found by streaming ~50 KB of the game summary, so they are looked up only every 2 minutes). The baseball names come from the MLB
+feed, the passing leader from ESPN's scoreboard (it names the game's top passer, which may be the other team's QB).
+The feed says a power play is on but not for whom, so the board works out the team from the next new penalty.
+Basketball has no banner for each basket (they come every half minute); goals in hockey and soccer do.
 
 ## Idle screen
 
@@ -113,6 +128,14 @@ Other behaviour:
 - **Brightness:** automatic mode follows the sun (full from 30 min after sunrise to 1 h before sunset, dim around it, dark-ish overnight); the settings page can switch back to clock hours.
 - **Quiet hours:** the panel goes dark between two hours you pick (may wrap midnight), on the settings page.
 - **Reminders:** the settings page has a Reminders section (text, date, optional time, once/daily/weekly; up to 10, 30 letters each). While the idle screen is rotating, each active reminder gets its own gold REMINDER slide after the sun slide. One with a time shows for 3 hours from then; without a time, all day. One-off reminders delete themselves once their day has passed. Kept in `reminders.json` (not in the settings backup).
+- **Division standings:** for each followed baseball team the idle rotation adds its division table (two slides: ranks 1-3, then 4-5 under the division name), from the MLB standings API every 30 min. Followed teams are in their colours.
+- **Countdowns:** pick "Countdown to this date" when adding a reminder; it shows "12 DAYS TO <name>" from 60 days before ("TODAY!" on the day) and removes itself afterwards.
+- **Magic number and wild card:** a followed baseball team leading its division gets a "MAGIC NUMBER" slide; one chasing a wild card spot gets "WILD CARD 2" with its games behind (or ahead). They come from the same standings read, so no extra request.
+- **Spoiler delay:** "Hold scores back" (15-120 s) delays every score, banner and ticker line so the panel doesn't beat your TV. After a restart the first read of each sport shows at once.
+- **Timer and stopwatch:** start a countdown (any minutes, or 5/10/30) or a stopwatch (start, pause, clear) from the settings page. It takes over the top of the idle screen, "TIME'S UP!" flashes for a minute. It is not shown while games are on screen, and it is lost on restart.
+- **Ticker scores:** choose all games or only your teams.
+- **Clock and speed:** the settings page switches 12/24-hour time and the ticker speed (slow to faster).
+- **Slide wipe:** each new idle slide wipes in from the left over about 6 frames instead of jumping.
 - **Backup:** `/export?k=KEY` shows the settings as JSON; paste it into the page's Restore box after a reflash.
 - **Housekeeping:** free memory goes in the log every 30 min, and the board restarts itself around 4 AM local (idle, up 6 h+).
 - **CI:** GitHub Actions runs the tests on every push.

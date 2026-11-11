@@ -13,6 +13,7 @@ LOGFILE = "log.txt"
 CACHE = "cache.json"
 REMINDERS = "reminders.json"
 MAX_REMINDERS = 10
+COUNTDOWN_DAYS = 60  # a countdown shows this many days ahead
 REMIND_HOURS = 3  # a reminder with a time stays up this long
 LOG_LINES = 40
 
@@ -27,6 +28,12 @@ DEFAULTS = {
     "qs": 0,         # quiet hours: the panel goes dark from hour qs (0-23)...
     "qe": 0,         # ...until hour qe. qs == qe means no quiet hours
     "sunbright": 1,  # 1 = automatic brightness follows sunrise/sunset, 0 = fixed clock hours
+    "h24": 0,        # 1 = 24-hour clock
+    "delay": 0,      # seconds to hold scores back, to match the TV broadcast (no spoilers)
+    "tickmine": 0,   # 1 = the idle ticker lists only games of the teams we follow
+    "news": 1,       # 1 = league headlines in the idle ticker
+    "logos": 1,      # 1 = team logos next to the scores in the single-game layouts
+    "speed": 1,      # ticker scroll speed: 0 slow, 1 normal, 2 fast, 3 faster
     "team_baseball": "LAD",  # the teams followed in each sport (up to 4, comma separated), by the abbreviation
     "team_football": "SEA",  # its game feed uses (scores.apply_teams checks these against teams.py)
     "team_hockey": "SEA",
@@ -34,7 +41,7 @@ DEFAULTS = {
     "team_soccer": "SEA",
 }
 LIMITS = {"display": (0, 1), "mode": (0, 2), "bright": (0, 100), "cameos": (0, 3), "lat": (-90, 90), "lon": (-180, 180),
-          "tz": (-12, 14), "qs": (0, 23), "qe": (0, 23), "sunbright": (0, 1)}
+          "tz": (-12, 14), "qs": (0, 23), "qe": (0, 23), "sunbright": (0, 1), "h24": (0, 1), "news": (0, 1), "logos": (0, 1), "delay": (0, 120), "tickmine": (0, 1), "speed": (0, 3)}
 
 cfg = dict(DEFAULTS)
 _lines = []
@@ -118,7 +125,8 @@ def quiet_now(hour):
 
 # -- reminders ----------------------------------------------------------------
 # Each is [text, date "YYYY-MM-DD", time "HH:MM" or "", repeat]; repeat 0 = once on that date,
-# 1 = every day from that date, 2 = every week on that date's weekday. They show on the idle screen.
+# 1 = every day from that date, 2 = every week on that date's weekday, 3 = countdown to that date
+# (shown from COUNTDOWN_DAYS before). They show on the idle screen.
 reminders = []
 
 
@@ -126,6 +134,15 @@ def _weekday(y, m, d):
     t = (0, 3, 2, 5, 0, 3, 5, 1, 4, 6, 2, 4)
     y -= m < 3
     return (y + y // 4 - y // 100 + y // 400 + t[m - 1] + d + 6) % 7  # 0 = Monday
+
+
+def _days(y, m, d):
+    """Days since 1970-01-01 (any consistent day number would do)."""
+    y -= m <= 2
+    era = y // 400
+    yoe = y - era * 400
+    doy = (153 * (m + (-3 if m > 2 else 9)) + 2) // 5 + d - 1
+    return era * 146097 + yoe * 365 + yoe // 4 - yoe // 100 + doy - 719468
 
 
 def load_reminders():
@@ -155,7 +172,7 @@ def add_reminder(text, date, hhmm="", repeat=0, save_now=True):
             raise ValueError("time")
         hhmm = "%02d:%02d" % (h, mi)
     repeat = int(repeat)
-    if repeat not in (0, 1, 2):
+    if repeat not in (0, 1, 2, 3):
         raise ValueError("repeat")
     reminders.append([text, "%04d-%02d-%02d" % (y, m, d), hhmm, repeat])
     if save_now:
@@ -171,13 +188,21 @@ def delete_reminder(i):
 
 
 def active_reminders(lt):
-    """Texts to show now. lt is a local time tuple (year, month, day, hour, minute, ...). Finished one-offs go."""
+    """[(text, days)] to show now; days is None except for countdowns. lt is a local time tuple
+    (year, month, day, hour, minute, ...). Finished one-offs and countdowns go."""
     out = []
     today = (lt[0], lt[1], lt[2])
     mins = lt[3] * 60 + lt[4]
     gone = []
     for r in reminders:
         y, m, d = [int(x) for x in r[1].split("-")]
+        if r[3] == 3:
+            left = _days(y, m, d) - _days(*today)
+            if left < 0:
+                gone.append(r)
+            elif left <= COUNTDOWN_DAYS:
+                out.append((r[0], left))
+            continue
         if r[3] == 0 and (y, m, d) < today:
             gone.append(r)
             continue
@@ -191,7 +216,7 @@ def active_reminders(lt):
             start = int(r[2][:2]) * 60 + int(r[2][3:])
             if not start <= mins < start + REMIND_HOURS * 60:
                 continue
-        out.append(r[0])
+        out.append((r[0], None))
     if gone:
         for r in gone:
             reminders.remove(r)

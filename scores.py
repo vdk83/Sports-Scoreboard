@@ -98,9 +98,13 @@ def apply_teams():
 
 DAYS = ("MON", "TUE", "WED", "THU", "FRI", "SAT", "SUN")
 
-# A game takes over the panel when it starts and stays this long after the start.
-# Until then the idle screen (next games + scores ticker) is shown.
-SHOW_AFTER = 12 * 3600
+# A game takes over the panel SHOW_BEFORE seconds before it starts and stays SHOW_AFTER seconds after it ended.
+# Otherwise the idle screen (next games + scores ticker) is shown.
+SHOW_BEFORE = 3600
+SHOW_AFTER = 3600
+# About how long a game lasts: used to guess when it ended if the board didn't see it end (e.g. it restarted).
+TYPICAL = {"baseball": 3 * 3600, "football": 3 * 3600 + 900, "hockey": 2 * 3600 + 1800,
+           "basketball": 2 * 3600 + 1800, "soccer": 2 * 3600}
 
 
 def iso_to_epoch(iso):
@@ -128,12 +132,22 @@ def local_now(t):
     return time.gmtime(t + utc_offset(t) * 3600)
 
 
+H24 = False  # 24-hour clock instead of 12-hour (set from the settings by app.py)
+
+
+def hhmm_text(h, m):
+    """'6:05P' (12-hour) or '18:05' (24-hour)."""
+    if H24:
+        return "%d:%02d" % (h, m)
+    return "%d:%02d%s" % (h % 12 or 12, m, "A" if h < 12 else "P")
+
+
 def local_time_str(iso, now, with_day=True):
     t = iso_to_epoch(iso)
     lt = time.gmtime(t + utc_offset(t) * 3600)
     nl = time.gmtime(now + utc_offset(now) * 3600)
     h = lt[3]
-    s = "%d:%02d%s" % (h % 12 or 12, lt[4], "A" if h < 12 else "P")
+    s = hhmm_text(h, lt[4])
     if with_day and (lt[0], lt[1], lt[2]) != (nl[0], nl[1], nl[2]):
         s = DAYS[lt[6]] + " " + s
     return s
@@ -226,6 +240,7 @@ def make_view(league, g, now):
         "sport": league["sport"],
         "color": league["color"] if ours else GOLD,
         "ours": ours,
+        "abbrs": (g["away"], g["home"]) if settings.cfg.get("logos", 1) else None,
         "tag": tag(g) or ("RIV" if rival(league, g) else None),
         "away": lab("away"), "home": lab("home"),
         "away_score": None if pre else g["away_score"],
@@ -237,12 +252,16 @@ def make_view(league, g, now):
     }
     if g["sport"] == "baseball" and g["state"] == "in" and "bases" in g:
         # live baseball: board draws the diamond, out dots and ABS challenge squares
-        view["live"] = {"bases": g["bases"], "outs": g["outs"], "count": g["count"], "abs": g["abs"]}
+        view["live"] = {"bases": g["bases"], "outs": g["outs"], "count": g["count"], "abs": g["abs"],
+                        "pitcher": g.get("pitcher", ""), "batter": g.get("batter", "")}
     if g["sport"] == "hockey" and g["state"] == "in" and g.get("sog"):
         # live hockey: shots on goal (away, home) and the team on a power play, if any
-        view["hockey"] = {"sog": g["sog"], "pp": g.get("pp"), "pp_on": g.get("pp_on", False)}
+        view["hockey"] = {"sog": g["sog"], "pp": g.get("pp"), "pp_on": g.get("pp_on", False),
+                          "goalies": g.get("goalies") or {}}
     if g["sport"] == "football" and g["state"] == "in" and 1 <= g["period"] <= 4:
         view["quarter"] = g["period"]
+        if g.get("qb"):
+            view["qb"] = g["qb"]
     return view
 
 
@@ -250,10 +269,25 @@ def game_key(sport, g):
     return (sport, g["name"], g["date"][:10])
 
 
-def visible(leagues_data, now, clock_ok, league_wide=()):
+def final_on_board(sport, g, now, ended):
+    """True while a finished game is within SHOW_AFTER of its end (seen by us, else start + a typical length)."""
+    end = ended.get(game_key(sport, g)) if ended else None
+    if end is None:
+        end = iso_to_epoch(g["date"]) + TYPICAL.get(sport, 3 * 3600)
+    return now - end <= SHOW_AFTER
+
+
+def soon_on_board(g, now):
+    """True for a game that starts within SHOW_BEFORE (or started a moment ago but the feed still says pre)."""
+    start = iso_to_epoch(g["date"])
+    return -3600 < start - now <= SHOW_BEFORE
+
+
+def visible(leagues_data, now, clock_ok, league_wide=(), ended=None):
     """[(league, game)] to put on screen: live first, then by importance, then start time.
 
-    Our teams' games always get a place. league_wide is [(league, games)] for every game in
+    Our teams' games get a place from an hour before they start until an hour after they end (`ended` maps a
+    game key to when we saw it finish). league_wide is [(league, games)] for every game in
     each league; its playoff games get a place too, the finals ahead of the rest. Each game is
     paired with the followed team playing in it (or the sport's own entry).
     """
@@ -267,7 +301,7 @@ def visible(leagues_data, now, clock_ok, league_wide=()):
             imp = importance(g)
             if not imp or game_key(league["sport"], g) in seen or g["state"] == "pre":
                 continue
-            if g["state"] == "post" and clock_ok and now - iso_to_epoch(g["date"]) > (8 if imp > 1 else 5) * 3600:
+            if g["state"] == "post" and clock_ok and not final_on_board(league["sport"], g, now, ended):
                 continue
             out.append((entry_for(league["sport"], g), g))
     done = set()
@@ -276,9 +310,9 @@ def visible(leagues_data, now, clock_ok, league_wide=()):
             key = game_key(league["sport"], g)
             if key in done:  # both teams followed: one card for the game
                 continue
-            if g["state"] == "pre":
-                continue  # not started yet; the idle screen covers it
-            if g["state"] == "post" and clock_ok and now - iso_to_epoch(g["date"]) > SHOW_AFTER:
+            if g["state"] == "pre" and not (clock_ok and soon_on_board(g, now)):
+                continue  # not close to starting; the idle screen covers it
+            if g["state"] == "post" and clock_ok and not final_on_board(league["sport"], g, now, ended):
                 continue
             done.add(key)
             out.append((entry_for(league["sport"], g), g))
@@ -339,7 +373,7 @@ def next_sun(now):
     t, name = best
     lt = time.gmtime(t + utc_offset(t) * 3600)
     h = lt[3]
-    return name, "%d:%02d%s" % (h % 12 or 12, lt[4], "A" if h < 12 else "P"), (t - now) // 60
+    return name, hhmm_text(h, lt[4]), (t - now) // 60
 
 
 def sun_today(now):
@@ -409,7 +443,7 @@ MARQUEE_BEFORE = 20 * 3600
 MARQUEE_AFTER = 14 * 3600
 
 
-def marquee_parts(all_games, now, clock_ok):
+def marquee_parts(all_games, now, clock_ok, mine_only=False):
     """Ticker text for every game in the league scoreboards, as [(text, colour)].
 
     all_games is [(league, games)]; our own teams are drawn in their team colour.
@@ -418,6 +452,8 @@ def marquee_parts(all_games, now, clock_ok):
     for league, games in all_games:
         picked = []
         for g in games:
+            if mine_only and not (followed(league["sport"], g["away"]) or followed(league["sport"], g["home"])):
+                continue
             if g["state"] != "in" and clock_ok:
                 start = iso_to_epoch(g["date"])
                 if g["state"] == "pre" and start - now > MARQUEE_BEFORE:

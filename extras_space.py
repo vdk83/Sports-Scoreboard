@@ -1,4 +1,4 @@
-# Extra cameos (Rocket, Ufo, Robot, Pacman, Invaders). Loaded only while one plays (see critters.EXTRAS).
+# Extra cameos (Rocket, Ufo, Pacman, Invaders). Loaded only while one plays (see critters.EXTRAS).
 # (see critters.EXTRAS), so keep this file's imports small.
 import math
 
@@ -82,32 +82,6 @@ class Ufo(Cameo):
                 b.rect(x + 1 + k * 3, y + 3, 1, 1, YELLOW)
         if 100 < f < 150:
             caption(b, "MOO?", WHITE, 22)
-
-
-class Robot(Cameo):
-    total = 220
-    BODY = ("..K..", ".KGK.", ".GRG.", "GGGGG", "GBGBG", "GGGGG", ".G.G.", ".K.K.")
-    ARM = ("G", "G", "G")
-    PAL = {"K": (60, 60, 70), "G": (170, 175, 190), "R": (255, 60, 60), "B": (90, 200, 255)}
-
-    def render(self, b, f):
-        b.rect(0, 30, 64, 2, (50, 50, 60))
-        x = -12 + f * 38 // 40 if f < 40 else 26
-        dance = f >= 50
-        lift = 2 if dance and (f // 6) % 2 else 0
-        y = 14 - lift
-        sprite(b, x, y, self.BODY, self.PAL, scale=2)
-        g = self.PAL["G"]
-        if dance:
-            a = (f // 4) % 2
-            b.rect(x - 3, y + 8 - (a * 6), 3, 2, g)
-            b.rect(x - 3, y + 6 - (a * 6), 2, 4, g)
-            b.rect(x + 10, y + 8 - ((1 - a) * 6), 3, 2, g)
-            b.rect(x + 11, y + 6 - ((1 - a) * 6), 2, 4, g)
-            caption(b, "BEEP" if (f // 8) % 2 else "BOOP", (120, 220, 255) if (f // 8) % 2 else (255, 150, 220), 3)
-        else:
-            b.rect(x - 2, y + 8, 2, 2, g)
-            b.rect(x + 10, y + 8, 2, 2, g)
 
 
 class Pacman(Cameo):

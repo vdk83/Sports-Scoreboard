@@ -72,11 +72,11 @@ def cameos():
 
 SAMPLE = dict(sport="baseball", name="SF @ LAD", date="2026-10-25", away="SF", away_score=2, home="LAD",
               home_score=3, clock="", period=7, state="in", detail="Top 7th", bases=(True, False, True),
-              outs=1, count="2-1", abs={"away": 1, "home": 2})
+              outs=1, count="2-1", abs={"away": 1, "home": 2}, pitcher="KERSHAW", batter="OHTANI")
 FOOT = dict(sport="football", name="KC @ SEA", date="2026-10-25", away="KC", away_score=17, home="SEA",
-            home_score=24, clock="5:21", period=3, state="in", detail="5:21 - 3rd")
+            home_score=24, clock="5:21", period=3, state="in", detail="5:21 - 3rd", qb=("LAWRENCE", 242, "away"))
 HOCKEY = dict(sport="hockey", name="VAN @ SEA", date="2026-10-25", away="VAN", away_score=1, home="SEA",
-              home_score=2, clock="12:03", period=2, state="in", detail="12:03 - 2nd", sog=(14, 21), pp="home", pp_on=True)
+              home_score=2, clock="12:03", period=2, state="in", detail="12:03 - 2nd", sog=(14, 21), pp="home", pp_on=True, goalies={"away": "DEMKO", "home": "GRUBAUER"})
 
 
 NBA = dict(sport="basketball", name="LAL @ GS", date="2026-10-25", away="LAL", away_score=104, home="GS",

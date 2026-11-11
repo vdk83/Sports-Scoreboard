@@ -9,4 +9,4 @@ jobs:
         with:
           python-version: "3.12"
       - run: python -m unittest test_logic test_app test_critters
-      - run: python -m py_compile app.py board.py critters.py extras_space.py extras_fun.py extras_sports.py extras_winter.py extras_winter2.py extras_spring.py extras_summer.py extras_summer2.py extras_fall.py extras_fall2.py espn.py mlb.py nhl.py ota.py page.py scores.py settings.py sun.py weather.py jokes.py
+      - run: python -m py_compile app.py board.py critters.py extras_space.py extras_fun.py extras_sports.py extras_winter.py extras_winter2.py extras_spring.py extras_summer.py extras_summer2.py extras_fall.py extras_fall2.py extras_arcade.py espn.py mlb.py nhl.py news.py logos.py make_logos.py ota.py page.py scores.py settings.py sun.py weather.py jokes.py

@@ -13,7 +13,7 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
 import critters  # noqa: E402
 
-MODULES = ("extras_space", "extras_fun", "extras_sports", "extras_winter", "extras_winter2", "extras_spring", "extras_summer", "extras_summer2", "extras_fall", "extras_fall2")
+MODULES = ("extras_space", "extras_fun", "extras_sports", "extras_winter", "extras_winter2", "extras_spring", "extras_summer", "extras_summer2", "extras_fall", "extras_fall2", "extras_arcade")
 
 
 def main():

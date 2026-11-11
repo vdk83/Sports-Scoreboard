@@ -11,7 +11,7 @@ HOST = "statsapi.mlb.com"
 FIELDS = ("dates,games,gamePk,gameType,gameDate,status,abstractGameState,detailedState,"
           "teams,away,home,score,team,abbreviation,linescore,currentInning,"
           "currentInningOrdinal,inningState,scheduledInnings,outs,balls,strikes,"
-          "offense,first,second,third,id")
+          "offense,first,second,third,id,defense,pitcher,batter,fullName")
 ABS_FIELDS = "gameData,absChallenges,hasChallenges,away,home,remaining"
 SKIP = ("Postponed", "Cancelled", "Canceled")
 
@@ -59,6 +59,8 @@ def convert(game):
     else:
         detail = detailed
     off = ls.get("offense") or {}
+    pitcher = ((ls.get("defense") or {}).get("pitcher") or {}).get("fullName")  # the team in the field's pitcher
+    batter = (off.get("batter") or {}).get("fullName")
     away = game["teams"]["away"]
     home = game["teams"]["home"]
     aa = away["team"]["abbreviation"]
@@ -78,6 +80,8 @@ def convert(game):
         "bases": ("first" in off, "second" in off, "third" in off),
         "outs": ls.get("outs", 0),
         "count": "%d-%d" % (ls.get("balls", 0), ls.get("strikes", 0)),
+        "pitcher": espn.last_name(pitcher) if pitcher else "",
+        "batter": espn.last_name(batter) if batter else "",
         "abs": None,
     }
 
@@ -92,6 +96,34 @@ def abs_challenges(pk):
     except Exception as e:
         print("abs fetch failed:", repr(e))
     return None
+
+
+_division = {}  # team id -> (league id, division id), looked up once
+
+
+def standings(team_id):
+    """(division id, [(team id, wins, losses), ...] best first) for the division this team plays in."""
+    gc.collect()
+    if team_id not in _division:
+        d = _get_json("/api/v1/teams/%d?fields=teams,division,id,league" % team_id, 2000)["teams"][0]
+        _division[team_id] = (d["league"]["id"], d["division"]["id"])
+    league, div = _division[team_id]
+    year = time.gmtime(time.time() - 60 * 86400)[0]  # the season runs from spring: before March it is still last year's
+    data = _get_json("/api/v1/standings?leagueId=%d&season=%d&standingsTypes=regularSeason"
+                     "&fields=records,division,id,teamRecords,team,id,wins,losses,divisionRank,magicNumber,wildCardRank,"
+                     "wildCardGamesBack" % (league, year), 30000)
+    rows = []
+    info = {}  # team id -> (magic number or "", wild card rank or "", games back or "")
+    for rec in data["records"]:
+        if rec["division"]["id"] == div:
+            rows = [(t["team"]["id"], t["wins"], t["losses"]) for t in rec["teamRecords"]]
+            for t in rec["teamRecords"]:
+                info[t["team"]["id"]] = (str(t.get("magicNumber", "")), str(t.get("wildCardRank", "")),
+                                         str(t.get("wildCardGamesBack", "")))
+            break
+    data = None
+    gc.collect()
+    return div, rows, info
 
 
 def fetch(team_ids):

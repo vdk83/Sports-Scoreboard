@@ -49,12 +49,12 @@ if(cur.length<4&&L.length){var s=document.createElement('select'),o0=document.cr
 L.forEach(function(o){if(cur.indexOf(o[0])<0){var q=document.createElement('option');q.value=o[0];q.textContent=o[1];s.appendChild(q)}});
 s.onchange=function(){if(s.value)pick(k,cur.concat([s.value]).join(','),'Following '+s.options[s.selectedIndex].textContent)};d.appendChild(s)}
 t.appendChild(d)});return t}
-function remsec(){var t=document.createElement('section');t.innerHTML='<h2>Reminders (shown between the slides)</h2>';
+function remsec(){var t=document.createElement('section');t.innerHTML='<h2>Reminders and countdowns (shown between the slides)</h2>';
 var R=window.RL||[],row=document.createElement('div');row.className='row';
-R.forEach(function(r,i){var w=['once','daily','weekly'][r[3]];row.appendChild(btn(r[0]+' - '+r[1]+(r[2]?' '+r[2]:'')+' ('+w+') \u00d7',1,function(){
+R.forEach(function(r,i){var w=['once','daily','weekly','countdown'][r[3]];row.appendChild(btn(r[0]+' - '+r[1]+(r[2]?' '+r[2]:'')+' ('+w+') \u00d7',1,function(){
 call('rem_del?i='+i).then(function(){toast('Deleted');rems()})},'chip'))});t.appendChild(row);
 if(R.length<10){t.insertAdjacentHTML('beforeend','<input id=rt maxlength=30 placeholder="Take out the trash"><div class=third><input id=rd type=date><input id=rh type=time></div>'+
-'<select id=rr><option value=0>Once</option><option value=1>Every day</option><option value=2>Every week</option></select>');
+'<select id=rr><option value=0>Once</option><option value=1>Every day</option><option value=2>Every week</option><option value=3>Countdown to this date</option></select>');
 if(window.RD)document.getElementById('rd').value=window.RD;
 t.appendChild(btn('Add reminder',0,function(){var x=document.getElementById('rt').value.trim(),d=document.getElementById('rd').value;
 window.RD=d;if(!x||!d){toast('Needs a name and a date');return}
@@ -73,6 +73,19 @@ var qh=document.createElement('section');qh.innerHTML='<h2>Quiet hours (panel da
 qr.className='third';qr.appendChild(field('qs','From hour (0-23)',S.qs));qr.appendChild(field('qe','Until hour',S.qe));qh.appendChild(qr);
 qh.appendChild(btn('Save quiet hours',0,function(){['qs','qe'].forEach(function(k){S[k]=document.getElementById(k).value});
 send('qs='+S.qs+'&qe='+S.qe)},'big'));qh.appendChild(btn('No quiet hours',0,function(){S.qs=S.qe=0;send('qs=0&qe=0','Cleared');draw()},'big'));a.appendChild(qh);
+a.appendChild(opts('Clock','h24',[['12-hour',0],['24-hour',1]]));
+function tsec(){var t=document.createElement('section');t.innerHTML='<h2>Timer and stopwatch (shown on the idle screen)</h2><input id=tm type=number min=1 max=1440 placeholder="Minutes">';
+t.appendChild(btn('Start timer',0,function(){var v=parseInt(document.getElementById('tm').value,10);if(v>0)send('timer='+v*60,'Timer started')},'big'));
+[5,10,30].forEach(function(m){t.appendChild(btn(m+' min',0,function(){send('timer='+m*60,'Timer started')}))});
+t.appendChild(btn('Cancel timer',0,function(){send('timer=0','Cancelled')}));
+t.appendChild(btn('Stopwatch start',0,function(){send('stopwatch=1','Running')}));t.appendChild(btn('Pause',0,function(){send('stopwatch=0','Paused')}));
+t.appendChild(btn('Clear',0,function(){send('stopwatch=clear','Cleared')}));return t}
+a.appendChild(opts('Hold scores back (spoiler delay)','delay',[['Off',0],['15 s',15],['30 s',30],['60 s',60],['90 s',90],['120 s',120]]));
+a.appendChild(opts('Ticker scores','tickmine',[['All games',0],['My teams only',1]]));
+a.appendChild(tsec());
+a.appendChild(opts('Headlines in ticker','news',[['On',1],['Off',0]]));
+a.appendChild(opts('Team logos','logos',[['On',1],['Off',0]]));
+a.appendChild(opts('Ticker speed','speed',[['Slow',0],['Normal',1],['Fast',2],['Faster',3]]));
 a.appendChild(opts('Idle screen','mode',[['Normal',0],['Big clock',1],['Cameos nonstop',2]]));
 var c=opts('Cameos','cameos',[['Often',0],['Normal',1],['Rare',2],['Off',3]]);
 c.firstChild.nextSibling.appendChild(btn('Play one now',0,function(){send('cameo=1','Playing')}));a.appendChild(c);
